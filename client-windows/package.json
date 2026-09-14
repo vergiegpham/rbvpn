@@ -1,0 +1,17 @@
+{
+  "name": "rbvpn-windows",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RB-VPN Windows client",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "electron": "^34.2.0"
+  }
+}

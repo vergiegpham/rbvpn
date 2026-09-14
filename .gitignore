@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.env
+.env.local
+*.db
+*.db-journal
+dist/
+out/
+.DS_Store
+docs/chatgpt/
+docs/chatgpt/_chatgpt_extract.txt
+docs/chatgpt/_chat_summary.txt

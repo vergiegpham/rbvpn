@@ -1,0 +1,13 @@
+{
+  "name": "rbvpn",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RB-VPN platform — website, API, Linux WireGuard nodes, Windows client",
+  "scripts": {
+    "api": "npm --prefix api run dev",
+    "api:setup": "npm --prefix api run db:setup",
+    "web": "npm --prefix website run dev",
+    "client": "npm --prefix client-windows start",
+    "agent": "npm --prefix server/vpn-agent start"
+  }
+}

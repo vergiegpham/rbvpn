@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RB-VPN</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand">RB-VPN</div>
+        <div id="status-pill" class="pill off">Disconnected</div>
+      </header>
+
+      <section id="view-login" class="card">
+        <h1>Sign in</h1>
+        <p class="muted">Connect through your VPS with WireGuard.</p>
+        <label>API URL</label>
+        <input id="apiUrl" type="text" placeholder="http://localhost:4000" />
+        <label>Email</label>
+        <input id="email" type="email" autocomplete="username" />
+        <label>Password</label>
+        <input id="password" type="password" autocomplete="current-password" />
+        <button id="btn-login" class="primary">Login</button>
+        <p id="login-error" class="error"></p>
+        <p class="hint">No account? Create one on the RB-VPN website.</p>
+      </section>
+
+      <section id="view-app" class="hidden">
+        <div class="card">
+          <p class="muted" id="user-email"></p>
+          <p id="sub-line">Checking subscription…</p>
+          <div class="row">
+            <button id="btn-connect" class="primary">Connect</button>
+            <button id="btn-disconnect" class="ghost">Disconnect</button>
+          </div>
+          <button id="btn-refresh" class="ghost full">Refresh config</button>
+          <p id="app-msg" class="muted"></p>
+        </div>
+        <button id="btn-logout" class="link">Log out</button>
+      </section>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
