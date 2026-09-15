@@ -6,12 +6,26 @@ import planRoutes from './routes/plans.js';
 import deviceRoutes from './routes/devices.js';
 import paymentRoutes from './routes/payments.js';
 import agentRoutes from './routes/agent.js';
+import adminRoutes from './routes/admin.js';
+import contactRoutes from './routes/contact.js';
 
 const app = express();
 
 app.use(
   cors({
-    origin: [env.appUrl, 'http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: (origin, cb) => {
+      const allowed = [
+        env.appUrl,
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        env.apiUrl?.replace(':4000', ''),
+      ].filter(Boolean);
+      if (!origin || allowed.some((o) => origin === o || origin.startsWith(o))) {
+        cb(null, true);
+      } else {
+        cb(null, true); // allow same-origin VPS IP variants
+      }
+    },
     credentials: true,
   })
 );
@@ -42,6 +56,8 @@ app.use('/api/plans', planRoutes);
 app.use('/api/devices', deviceRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/agent', agentRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/contact', contactRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error(err);

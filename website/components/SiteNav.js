@@ -25,9 +25,11 @@ export default function SiteNav() {
       <div className="nav-links">
         <Link href="/pricing">Pricing</Link>
         <Link href="/download">Download</Link>
+        <Link href="/contact">Contact</Link>
         {user ? (
           <>
             <Link href="/dashboard">Dashboard</Link>
+            {user.role === 'admin' && <Link href="/admin">Admin</Link>}
             <button type="button" className="nav-btn" onClick={logout}>
               Log out
             </button>

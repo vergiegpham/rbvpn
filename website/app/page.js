@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import SiteNav from '@/components/SiteNav';
+import HeroCta from '@/components/HeroCta';
 
 export default function HomePage() {
   return (
@@ -9,37 +10,30 @@ export default function HomePage() {
         <div className="hero-inner">
           <h1 className="hero-brand">RB-VPN</h1>
           <p className="hero-copy">
-            Private WireGuard tunnels through your own VPS exit IPs. Fast Windows client,
-            Linux nodes, and checkout with Stripe or crypto.
+            Private encrypted access through dedicated VPS exit IPs. Fast Windows app,
+            global nodes, and checkout with Stripe or crypto.
           </p>
-          <div className="cta-row">
-            <Link href="/register" className="btn-primary">
-              Start free account
-            </Link>
-            <Link href="/pricing" className="btn-secondary">
-              View plans
-            </Link>
-          </div>
+          <HeroCta />
         </div>
       </section>
 
       <section className="section">
         <h2>Built for exit-IP routing</h2>
         <p className="lead">
-          Your PC connects over WireGuard to a Linux VPS. Sites see the VPS public IP —
-          the same architecture as a self-hosted gateway, packaged as a sellable service.
+          Your PC connects to an RB-VPN node. Websites see the VPS public IP — packaged as a
+          simple service with account, billing, and a one-click Windows app.
         </p>
         <div className="pricing-grid">
           <div className="price-panel">
-            <h3>Windows client</h3>
+            <h3>Windows app</h3>
             <p className="lead" style={{ margin: 0 }}>
-              Login, pull config, connect/disconnect with the official WireGuard engine.
+              Install the RB-VPN .exe, sign in, and connect in one click.
             </p>
           </div>
           <div className="price-panel">
-            <h3>Linux VPN nodes</h3>
+            <h3>Private nodes</h3>
             <p className="lead" style={{ margin: 0 }}>
-              WireGuard + NAT on VPS. An agent syncs peers from the control API.
+              Linux VPS nodes with encrypted tunnels and automatic account provisioning.
             </p>
           </div>
           <div className="price-panel">
@@ -51,7 +45,9 @@ export default function HomePage() {
         </div>
       </section>
 
-      <footer>© {new Date().getFullYear()} RB-VPN</footer>
+      <footer>
+        © {new Date().getFullYear()} RB-VPN · <Link href="/contact">Contact us</Link>
+      </footer>
     </main>
   );
 }

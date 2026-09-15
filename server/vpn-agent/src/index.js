@@ -6,7 +6,7 @@ dotenv.config();
 const API_URL = process.env.API_URL || 'http://127.0.0.1:4000';
 const NODE_ID = process.env.NODE_ID;
 const SECRET = process.env.NODE_AGENT_SECRET;
-const POLL_MS = Number(process.env.POLL_INTERVAL_MS || 10000);
+const POLL_MS = Number(process.env.POLL_INTERVAL_MS || 3000);
 const WG_BIN = process.env.WG_BIN || 'wg';
 const DRY_RUN = process.env.DRY_RUN === 'true';
 

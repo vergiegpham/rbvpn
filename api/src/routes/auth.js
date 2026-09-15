@@ -51,17 +51,34 @@ router.post('/login', async (req, res) => {
   const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
 
+  if (user.suspended) {
+    return res.status(403).json({ error: 'Account suspended. Contact support.' });
+  }
+
   const token = signToken(user);
   res.json({
     token,
-    user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      suspended: false,
+    },
   });
 });
 
 router.get('/me', authRequired, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.user.sub },
-    select: { id: true, email: true, name: true, role: true, createdAt: true },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      suspended: true,
+      createdAt: true,
+    },
   });
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user });

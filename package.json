@@ -8,6 +8,11 @@
     "api:setup": "npm --prefix api run db:setup",
     "web": "npm --prefix website run dev",
     "client": "npm --prefix client-windows start",
-    "agent": "npm --prefix server/vpn-agent start"
+    "agent": "npm --prefix server/vpn-agent start",
+    "deploy:vps": "python server/scripts/deploy-to-vps.py",
+    "deploy:vps:api": "python server/scripts/deploy-to-vps.py --only api,agent,scripts",
+    "deploy:vps:admin": "python server/scripts/deploy-to-vps.py --only api,website",
+    "deploy:vps:web": "python server/scripts/deploy-to-vps.py --only website",
+    "client:dist": "npm --prefix client-windows run dist"
   }
 }

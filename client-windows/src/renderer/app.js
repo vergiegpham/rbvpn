@@ -3,13 +3,56 @@ const appView = document.getElementById('view-app');
 const statusPill = document.getElementById('status-pill');
 const loginError = document.getElementById('login-error');
 const appMsg = document.getElementById('app-msg');
+const logHint = document.getElementById('log-hint');
 const subLine = document.getElementById('sub-line');
 const userEmail = document.getElementById('user-email');
+const nodeSelect = document.getElementById('nodeSelect');
+
+let unsubProgress = null;
 
 function setConnected(on) {
   statusPill.textContent = on ? 'Connected' : 'Disconnected';
   statusPill.classList.toggle('on', on);
   statusPill.classList.toggle('off', !on);
+  document.getElementById('btn-connect').classList.toggle('hidden', on);
+  document.getElementById('btn-disconnect').classList.toggle('hidden', !on);
+}
+
+async function refreshLogHint() {
+  try {
+    const p = await window.rbvpn.getLogPath();
+    logHint.textContent = `Log: ${p}`;
+  } catch {
+    logHint.textContent = '';
+  }
+}
+
+async function loadNodes(preferredId) {
+  nodeSelect.innerHTML = '';
+  try {
+    const { nodes } = await window.rbvpn.listNodes();
+    if (!nodes?.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No nodes available';
+      nodeSelect.appendChild(opt);
+      return;
+    }
+    for (const n of nodes) {
+      const opt = document.createElement('option');
+      opt.value = n.id;
+      opt.textContent = `${n.name} (${n.region})`;
+      nodeSelect.appendChild(opt);
+    }
+    if (preferredId && nodes.some((n) => n.id === preferredId)) {
+      nodeSelect.value = preferredId;
+    }
+  } catch (err) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = err.message;
+    nodeSelect.appendChild(opt);
+  }
 }
 
 async function showApp(email) {
@@ -17,13 +60,17 @@ async function showApp(email) {
   appView.classList.remove('hidden');
   userEmail.textContent = email || '';
   appMsg.textContent = '';
+  setConnected(false);
+  await refreshLogHint();
+  const settings = await window.rbvpn.getSettings();
+  await loadNodes(settings.nodeId);
   try {
     const { subscription } = await window.rbvpn.fetchSubscription();
     if (!subscription) {
       subLine.textContent = 'No active plan. Buy one on the website first.';
     } else {
       const ends = new Date(subscription.endsAt).toLocaleDateString();
-      subLine.textContent = `${subscription.plan.name} · active until ${ends}`;
+      subLine.textContent = `${subscription.plan.name} · active until ${ends} · all nodes`;
     }
   } catch (err) {
     subLine.textContent = err.message;
@@ -38,7 +85,7 @@ function showLogin() {
 
 async function boot() {
   const settings = await window.rbvpn.getSettings();
-  document.getElementById('apiUrl').value = settings.apiUrl || 'http://localhost:4000';
+  document.getElementById('apiUrl').value = settings.apiUrl || 'http://162.35.175.39:4000';
   document.getElementById('email').value = settings.email || '';
   if (settings.token) {
     await showApp(settings.email);
@@ -66,40 +113,60 @@ document.getElementById('btn-logout').addEventListener('click', async () => {
   showLogin();
 });
 
-document.getElementById('btn-refresh').addEventListener('click', async () => {
-  appMsg.textContent = 'Fetching WireGuard config…';
-  try {
-    const config = await window.rbvpn.ensureDevice();
-    appMsg.textContent = `Config ready · ${config.nodeName} (${config.endpoint})\n${await window.rbvpn.showConfPath()}`;
-  } catch (err) {
-    appMsg.textContent = err.message;
-  }
+nodeSelect.addEventListener('change', async () => {
+  await window.rbvpn.saveSettings({ nodeId: nodeSelect.value });
+});
+
+document.getElementById('btn-open-log').addEventListener('click', async () => {
+  await window.rbvpn.openLogFolder();
 });
 
 document.getElementById('btn-connect').addEventListener('click', async () => {
-  appMsg.textContent = 'Preparing tunnel…';
+  appMsg.textContent = 'Connecting…';
+  setConnected(false);
+  if (unsubProgress) unsubProgress();
+  unsubProgress = window.rbvpn.onConnectProgress(({ message }) => {
+    if (message) appMsg.textContent = message;
+  });
   try {
-    await window.rbvpn.ensureDevice();
+    const nodeId = nodeSelect.value;
+    await window.rbvpn.saveSettings({ nodeId });
+    const config = await window.rbvpn.ensureDevice({ nodeId });
     const result = await window.rbvpn.connect();
+    await refreshLogHint();
     if (!result.ok) {
-      appMsg.textContent = result.error;
+      appMsg.textContent = result.error + (result.detail ? `\n${result.detail}` : '');
       setConnected(false);
       return;
     }
     setConnected(true);
-    appMsg.textContent = result.message || 'Connected';
+    appMsg.textContent = `${result.message || 'Connected'} · ${config.nodeName}`;
   } catch (err) {
     setConnected(false);
     appMsg.textContent = err.message;
+    await refreshLogHint();
+  } finally {
+    if (unsubProgress) {
+      unsubProgress();
+      unsubProgress = null;
+    }
   }
 });
 
 document.getElementById('btn-disconnect').addEventListener('click', async () => {
+  appMsg.textContent = 'Disconnecting…';
+  if (unsubProgress) unsubProgress();
+  unsubProgress = window.rbvpn.onConnectProgress(({ message }) => {
+    if (message) appMsg.textContent = message;
+  });
   const result = await window.rbvpn.disconnect();
   setConnected(false);
-  appMsg.textContent = result.ok
-    ? 'Disconnected'
-    : result.error || 'Disconnected (manual deactivate may be required)';
+  appMsg.textContent = result.ok ? 'Disconnected' : result.error || 'Disconnected';
+  await refreshLogHint();
+  if (unsubProgress) {
+    unsubProgress();
+    unsubProgress = null;
+  }
 });
 
 boot();

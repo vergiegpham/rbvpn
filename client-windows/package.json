@@ -3,15 +3,74 @@
   "version": "1.0.0",
   "private": true,
   "description": "RB-VPN Windows client",
+  "author": "RB-VPN",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron ."
+    "dev": "electron .",
+    "prepare:runtime": "node scripts/prepare-runtime.js",
+    "dist": "npm run prepare:runtime && electron-builder --win",
+    "dist:dir": "npm run prepare:runtime && electron-builder --win --dir"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
   },
   "devDependencies": {
-    "electron": "^34.2.0"
+    "electron": "^34.5.8",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.rbvpn.client",
+    "productName": "RB-VPN",
+    "copyright": "Copyright © RB-VPN",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/tunnel",
+        "to": "tunnel",
+        "filter": [
+          "rbvpn-network-runtime.msi"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "RB-VPN-Setup-${version}.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "RB-VPN",
+      "differentialPackage": false,
+      "include": "build/installer.nsh",
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "RB-VPN-Portable-${version}.${ext}"
+    }
   }
 }

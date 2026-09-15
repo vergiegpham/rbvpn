@@ -1,0 +1,366 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { authRequired, adminRequired } from '../middleware/auth.js';
+import { prisma } from '../utils/db.js';
+import { activateSubscription } from '../services/subscription.js';
+
+const router = Router();
+router.use(authRequired, adminRequired);
+
+router.get('/stats', async (_req, res) => {
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const [users, activeSubs, devices, nodes, paymentsPaid, dailyRevenue, monthlyRevenue] =
+    await Promise.all([
+      prisma.user.count(),
+      prisma.subscription.count({
+        where: { status: 'active', endsAt: { gt: now } },
+      }),
+      prisma.device.count(),
+      prisma.vpnNode.count({ where: { active: true } }),
+      prisma.payment.count({ where: { status: 'paid' } }),
+      prisma.payment.aggregate({
+        where: { status: 'paid', createdAt: { gte: startOfDay } },
+        _sum: { amountCents: true },
+      }),
+      prisma.payment.aggregate({
+        where: { status: 'paid', createdAt: { gte: startOfMonth } },
+        _sum: { amountCents: true },
+      }),
+    ]);
+  res.json({
+    stats: {
+      users,
+      activeSubscriptions: activeSubs,
+      devices,
+      activeNodes: nodes,
+      paidPayments: paymentsPaid,
+      dailyRevenueCents: dailyRevenue._sum.amountCents || 0,
+      monthlyRevenueCents: monthlyRevenue._sum.amountCents || 0,
+    },
+  });
+});
+
+router.get('/users', async (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const users = await prisma.user.findMany({
+    where: q
+      ? {
+          OR: [
+            { email: { contains: q } },
+            { name: { contains: q } },
+          ],
+        }
+      : undefined,
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      suspended: true,
+      suspendedAt: true,
+      createdAt: true,
+      subscriptions: {
+        where: { status: 'active' },
+        orderBy: { endsAt: 'desc' },
+        take: 1,
+        include: { plan: { select: { name: true, code: true } } },
+      },
+      _count: { select: { devices: true, payments: true } },
+    },
+  });
+  res.json({ users });
+});
+
+router.patch('/users/:id', async (req, res) => {
+  const schema = z.object({
+    role: z.enum(['user', 'admin']).optional(),
+    name: z.string().min(1).max(80).optional(),
+    suspended: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+
+  if (parsed.data.suspended === true && req.params.id === req.user.sub) {
+    return res.status(400).json({ error: 'You cannot suspend your own account' });
+  }
+
+  const data = { ...parsed.data };
+  if (parsed.data.suspended === true) {
+    data.suspendedAt = new Date();
+  } else if (parsed.data.suspended === false) {
+    data.suspendedAt = null;
+  }
+
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data,
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      suspended: true,
+      suspendedAt: true,
+    },
+  });
+
+  if (parsed.data.suspended === true) {
+    await prisma.device.updateMany({
+      where: { userId: user.id, syncStatus: { not: 'delete_pending' } },
+      data: { syncStatus: 'delete_pending' },
+    });
+  } else if (parsed.data.suspended === false) {
+    // Re-provision any peers not yet removed by the node agent
+    await prisma.device.updateMany({
+      where: { userId: user.id, syncStatus: 'delete_pending' },
+      data: { syncStatus: 'pending' },
+    });
+  }
+
+  res.json({ user });
+});
+
+router.post('/users/:id/suspend', async (req, res) => {
+  if (req.params.id === req.user.sub) {
+    return res.status(400).json({ error: 'You cannot suspend your own account' });
+  }
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { suspended: true, suspendedAt: new Date() },
+    select: { id: true, email: true, suspended: true, suspendedAt: true },
+  });
+  await prisma.device.updateMany({
+    where: { userId: user.id, syncStatus: { not: 'delete_pending' } },
+    data: { syncStatus: 'delete_pending' },
+  });
+  res.json({ user, ok: true });
+});
+
+router.post('/users/:id/unsuspend', async (req, res) => {
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { suspended: false, suspendedAt: null },
+    select: { id: true, email: true, suspended: true, suspendedAt: true },
+  });
+  await prisma.device.updateMany({
+    where: { userId: user.id, syncStatus: 'delete_pending' },
+    data: { syncStatus: 'pending' },
+  });
+  res.json({ user, ok: true });
+});
+
+router.delete('/users/:id', async (req, res) => {
+  const userId = req.params.id;
+
+  if (userId === req.user.sub) {
+    return res.status(400).json({ error: 'You cannot delete your own account from admin' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  if (user.role === 'admin') {
+    const adminCount = await prisma.user.count({ where: { role: 'admin' } });
+    if (adminCount <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the last admin account' });
+    }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.device.updateMany({
+      where: { userId },
+      data: { syncStatus: 'delete_pending' },
+    });
+    await tx.user.delete({ where: { id: userId } });
+  });
+
+  res.json({ ok: true, deleted: user.email });
+});
+
+router.post('/users/:id/subscription', async (req, res) => {
+  const schema = z.object({ planCode: z.string() });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'planCode required' });
+
+  const plan = await prisma.plan.findFirst({
+    where: { code: parsed.data.planCode, active: true },
+  });
+  if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+  const sub = await activateSubscription(req.params.id, plan.id);
+  res.status(201).json({ subscription: sub });
+});
+
+router.post('/users/:id/subscription/cancel', async (req, res) => {
+  await prisma.subscription.updateMany({
+    where: { userId: req.params.id, status: 'active' },
+    data: { status: 'cancelled' },
+  });
+  res.json({ ok: true });
+});
+
+router.get('/subscriptions', async (_req, res) => {
+  const subs = await prisma.subscription.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    include: {
+      user: { select: { id: true, email: true, name: true } },
+      plan: { select: { name: true, code: true } },
+    },
+  });
+  res.json({ subscriptions: subs });
+});
+
+router.get('/payments', async (_req, res) => {
+  const payments = await prisma.payment.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    include: {
+      user: { select: { id: true, email: true } },
+      plan: { select: { name: true, code: true } },
+    },
+  });
+  res.json({ payments });
+});
+
+router.get('/devices', async (_req, res) => {
+  const devices = await prisma.device.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    include: {
+      user: { select: { id: true, email: true } },
+      node: { select: { id: true, name: true, region: true } },
+    },
+  });
+  res.json({ devices });
+});
+
+router.get('/plans', async (_req, res) => {
+  const plans = await prisma.plan.findMany({ orderBy: { priceCents: 'asc' } });
+  res.json({ plans });
+});
+
+router.patch('/plans/:id', async (req, res) => {
+  const schema = z.object({
+    name: z.string().optional(),
+    description: z.string().optional(),
+    priceCents: z.number().int().positive().optional(),
+    durationDays: z.number().int().positive().optional(),
+    maxDevices: z.number().int().positive().optional(),
+    active: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+
+  const plan = await prisma.plan.update({
+    where: { id: req.params.id },
+    data: parsed.data,
+  });
+  res.json({ plan });
+});
+
+router.get('/nodes', async (_req, res) => {
+  const nodes = await prisma.vpnNode.findMany({
+    orderBy: { createdAt: 'asc' },
+    include: { _count: { select: { devices: true } } },
+  });
+  res.json({ nodes });
+});
+
+router.post('/nodes', async (req, res) => {
+  const schema = z.object({
+    name: z.string().min(1),
+    region: z.string().min(1),
+    publicHost: z.string().min(1),
+    publicPort: z.coerce.number().int().default(51820),
+    publicKey: z.string().min(1),
+    interfaceName: z.string().default('wg0'),
+    subnetCidr: z.string().default('10.10.0.0/24'),
+    gatewayIp: z.string().default('10.10.0.1'),
+    capacity: z.coerce.number().int().positive().default(250),
+    active: z.boolean().default(true),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid node fields. Check name, host, and public key.' });
+  }
+
+  const node = await prisma.vpnNode.create({ data: parsed.data });
+  res.status(201).json({ node });
+});
+
+router.patch('/nodes/:id', async (req, res) => {
+  const schema = z.object({
+    name: z.string().min(1).optional(),
+    region: z.string().min(1).optional(),
+    publicHost: z.string().min(1).optional(),
+    publicPort: z.coerce.number().int().optional(),
+    publicKey: z.string().min(1).optional(),
+    interfaceName: z.string().optional(),
+    subnetCidr: z.string().optional(),
+    gatewayIp: z.string().optional(),
+    capacity: z.coerce.number().int().positive().optional(),
+    active: z.boolean().optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+
+  const node = await prisma.vpnNode.update({
+    where: { id: req.params.id },
+    data: parsed.data,
+  });
+  res.json({ node });
+});
+
+router.delete('/nodes/:id', async (req, res) => {
+  const nodeId = req.params.id;
+  const deviceCount = await prisma.device.count({
+    where: { nodeId, syncStatus: { not: 'delete_pending' } },
+  });
+  if (deviceCount > 0) {
+    return res.status(400).json({
+      error: `Cannot delete node with ${deviceCount} active device(s). Move or remove them first.`,
+    });
+  }
+  await prisma.device.deleteMany({ where: { nodeId } });
+  await prisma.vpnNode.delete({ where: { id: nodeId } });
+  res.json({ ok: true });
+});
+
+router.get('/messages', async (req, res) => {
+  const status = String(req.query.status || '').trim();
+  const messages = await prisma.contactMessage.findMany({
+    where: status ? { status } : undefined,
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+  });
+  const unread = await prisma.contactMessage.count({ where: { status: 'new' } });
+  res.json({ messages, unread });
+});
+
+router.patch('/messages/:id', async (req, res) => {
+  const schema = z.object({
+    status: z.enum(['new', 'read', 'replied', 'archived']),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid status' });
+
+  const message = await prisma.contactMessage.update({
+    where: { id: req.params.id },
+    data: { status: parsed.data.status },
+  });
+  res.json({ message });
+});
+
+router.delete('/messages/:id', async (req, res) => {
+  await prisma.contactMessage.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+
+export default router;

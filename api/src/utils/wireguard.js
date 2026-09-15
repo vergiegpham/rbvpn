@@ -39,7 +39,7 @@ export function buildClientConfig({
   dns = '1.1.1.1',
   serverPublicKey,
   endpoint,
-  allowedIps = '0.0.0.0/0, ::/0',
+  allowedIps = '0.0.0.0/0',
 }) {
   return [
     '[Interface]',

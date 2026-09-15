@@ -13,6 +13,8 @@ model User {
   passwordHash String
   name         String?
   role         String         @default("user")
+  suspended    Boolean        @default(false)
+  suspendedAt  DateTime?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   subscriptions Subscription[]
@@ -108,4 +110,18 @@ model Payment {
   @@index([userId])
   @@index([providerRef])
   @@index([status])
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  status    String   @default("new")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
 }

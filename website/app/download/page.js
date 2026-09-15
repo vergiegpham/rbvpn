@@ -1,62 +1,74 @@
+'use client';
+
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import SiteNav from '@/components/SiteNav';
+import { getStoredUser, getToken } from '@/lib/api';
 
 export default function DownloadPage() {
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    if (getToken()) setUser(getStoredUser());
+  }, []);
+
   return (
     <div className="form-shell">
       <SiteNav />
       <section className="section">
         <h2>Download</h2>
         <p className="lead">
-          RB-VPN for Windows uses the official WireGuard driver. Install both pieces below.
+          Get the RB-VPN Windows app — a single installer. Sign in with your account and
+          connect.
         </p>
 
         <div className="dash-grid">
           <div className="panel">
-            <h3>1. WireGuard for Windows</h3>
+            <h3>Windows</h3>
             <p className="lead">
-              Required tunnel engine from the WireGuard project.
+              Download <strong>RB-VPN Setup.exe</strong>, install, then open RB-VPN from the
+              Start menu or desktop shortcut.
             </p>
-            <a
-              className="btn-primary"
-              href="https://www.wireguard.com/install/"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Get WireGuard
+            <a className="btn-primary" href="/downloads/RB-VPN-Setup.exe">
+              Download for Windows
             </a>
+            <p className="lead" style={{ marginTop: '0.75rem' }}>
+              The Setup includes everything needed to connect. Install, sign in, and click
+              Connect.
+            </p>
           </div>
           <div className="panel">
-            <h3>2. RB-VPN client</h3>
-            <p className="lead">
-              From this repo: <code>client-windows</code>. Run with npm after installing
-              dependencies.
-            </p>
-            <pre
-              style={{
-                background: '#0f1a28',
-                color: '#d7e6ff',
-                padding: '0.9rem',
-                borderRadius: '0.75rem',
-                overflow: 'auto',
-              }}
-            >{`cd client-windows
-npm install
-npm start`}</pre>
+            <h3>How to connect</h3>
+            <ol className="lead">
+              {user ? (
+                <>
+                  <li>Buy or extend a plan if you do not have one yet.</li>
+                  <li>Install RB-VPN and sign in with this account.</li>
+                  <li>Choose a server node and click Connect.</li>
+                  <li>Confirm your exit IP matches the RB-VPN node.</li>
+                </>
+              ) : (
+                <>
+                  <li>Create an account and buy a plan.</li>
+                  <li>Install RB-VPN and sign in.</li>
+                  <li>Click Connect (approve administrator if prompted).</li>
+                  <li>Confirm your exit IP matches the RB-VPN node.</li>
+                </>
+              )}
+            </ol>
+            {user ? (
+              <Link
+                href={user.role === 'admin' ? '/admin' : '/dashboard'}
+                className="btn-primary"
+              >
+                {user.role === 'admin' ? 'Open admin' : 'Go to dashboard'}
+              </Link>
+            ) : (
+              <Link href="/register" className="btn-primary">
+                Create account
+              </Link>
+            )}
           </div>
-        </div>
-
-        <div className="panel" style={{ marginTop: '1rem' }}>
-          <h3>Connect flow</h3>
-          <ol className="lead">
-            <li>Create an account and buy a plan (Stripe or crypto).</li>
-            <li>Open RB-VPN client → sign in with the same email.</li>
-            <li>Click Connect — the app fetches a WireGuard config and activates the tunnel.</li>
-            <li>Verify exit IP (e.g. visit ifconfig.me) matches your VPS.</li>
-          </ol>
-          <Link href="/register" className="btn-primary">
-            Create account
-          </Link>
         </div>
       </section>
     </div>

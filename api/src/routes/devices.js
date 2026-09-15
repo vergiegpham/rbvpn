@@ -6,16 +6,18 @@ import {
   createDevice,
   deleteDevice,
   getDeviceConfig,
+  switchDeviceNode,
 } from '../services/devices.js';
 import { prisma } from '../utils/db.js';
 
 const router = Router();
 
 router.get('/nodes/list', authRequired, async (_req, res) => {
+  // Every subscribed user (Basic included) can see and use all active nodes.
   const nodes = await prisma.vpnNode.findMany({
     where: { active: true },
     select: { id: true, name: true, region: true, publicHost: true },
-    orderBy: { name: 'asc' },
+    orderBy: [{ region: 'asc' }, { name: 'asc' }],
   });
   res.json({ nodes });
 });
@@ -45,6 +47,31 @@ router.post('/', authRequired, async (req, res) => {
 
     const device = await createDevice(req.user.sub, parsed.data);
     res.status(201).json({
+      device: {
+        id: device.id,
+        name: device.name,
+        clientIp: device.clientIp,
+        syncStatus: device.syncStatus,
+        node: {
+          id: device.node.id,
+          name: device.node.name,
+          region: device.node.region,
+        },
+      },
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+router.post('/:id/node', authRequired, async (req, res) => {
+  try {
+    const schema = z.object({ nodeId: z.string().min(1) });
+    const parsed = schema.safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: 'nodeId required' });
+
+    const device = await switchDeviceNode(req.user.sub, req.params.id, parsed.data.nodeId);
+    res.json({
       device: {
         id: device.id,
         name: device.name,

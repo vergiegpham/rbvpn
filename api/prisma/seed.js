@@ -4,13 +4,20 @@ import bcrypt from 'bcryptjs';
 const prisma = new PrismaClient();
 
 async function main() {
-  const basic = await prisma.plan.upsert({
+  const basicMonthly = await prisma.plan.upsert({
     where: { code: 'basic' },
-    update: {},
+    update: {
+      name: 'Basic Monthly',
+      description: '1 device · all nodes · billed monthly',
+      priceCents: 999,
+      durationDays: 30,
+      maxDevices: 1,
+      active: true,
+    },
     create: {
       code: 'basic',
-      name: 'Basic',
-      description: '1 device · 1 region · full-speed WireGuard',
+      name: 'Basic Monthly',
+      description: '1 device · all nodes · billed monthly',
       priceCents: 999,
       currency: 'usd',
       durationDays: 30,
@@ -19,18 +26,69 @@ async function main() {
     },
   });
 
-  const pro = await prisma.plan.upsert({
+  const proMonthly = await prisma.plan.upsert({
     where: { code: 'pro' },
-    update: {},
+    update: {
+      name: 'Pro Monthly',
+      description: '3 devices · all nodes · billed monthly',
+      priceCents: 1999,
+      durationDays: 30,
+      maxDevices: 3,
+      active: true,
+    },
     create: {
       code: 'pro',
-      name: 'Pro',
-      description: '3 devices · priority nodes · full-speed WireGuard',
+      name: 'Pro Monthly',
+      description: '3 devices · all nodes · billed monthly',
       priceCents: 1999,
       currency: 'usd',
       durationDays: 30,
       maxDevices: 3,
       stripePriceId: process.env.STRIPE_PRICE_PRO || null,
+    },
+  });
+
+  const basicAnnual = await prisma.plan.upsert({
+    where: { code: 'basic-annual' },
+    update: {
+      name: 'Basic Annual',
+      description: '1 device · all nodes · billed yearly',
+      priceCents: 10000,
+      durationDays: 365,
+      maxDevices: 1,
+      active: true,
+    },
+    create: {
+      code: 'basic-annual',
+      name: 'Basic Annual',
+      description: '1 device · all nodes · billed yearly',
+      priceCents: 10000,
+      currency: 'usd',
+      durationDays: 365,
+      maxDevices: 1,
+      stripePriceId: process.env.STRIPE_PRICE_BASIC_ANNUAL || null,
+    },
+  });
+
+  const proAnnual = await prisma.plan.upsert({
+    where: { code: 'pro-annual' },
+    update: {
+      name: 'Pro Annual',
+      description: '3 devices · all nodes · billed yearly',
+      priceCents: 20000,
+      durationDays: 365,
+      maxDevices: 3,
+      active: true,
+    },
+    create: {
+      code: 'pro-annual',
+      name: 'Pro Annual',
+      description: '3 devices · all nodes · billed yearly',
+      priceCents: 20000,
+      currency: 'usd',
+      durationDays: 365,
+      maxDevices: 3,
+      stripePriceId: process.env.STRIPE_PRICE_PRO_ANNUAL || null,
     },
   });
 
@@ -72,7 +130,13 @@ async function main() {
     },
   });
 
-  console.log('Seeded plans:', basic.code, pro.code);
+  console.log(
+    'Seeded plans:',
+    basicMonthly.code,
+    proMonthly.code,
+    basicAnnual.code,
+    proAnnual.code
+  );
   console.log('Admin login: admin@rbvpn.local / admin123!');
 }
 

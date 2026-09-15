@@ -14,8 +14,8 @@ const body = Source_Sans_3({
 });
 
 export const metadata = {
-  title: 'RB-VPN — Secure WireGuard access',
-  description: 'RB-VPN routes your traffic through private VPS nodes with WireGuard. Stripe and crypto payments.',
+  title: 'RB-VPN — Secure private access',
+  description: 'RB-VPN routes your traffic through private VPS nodes. Stripe and crypto payments.',
 };
 
 export default function RootLayout({ children }) {

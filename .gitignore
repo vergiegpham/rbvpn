@@ -5,8 +5,18 @@ node_modules/
 *.db
 *.db-journal
 dist/
+dist-build/
 out/
 .DS_Store
 docs/chatgpt/
 docs/chatgpt/_chatgpt_extract.txt
 docs/chatgpt/_chat_summary.txt
+vps info
+vps-info*
+*.pem
+*.ppk
+client-windows/dist/
+client-windows/dist-build/
+client-windows/vendor/
+client-windows/electron-win.zip
+website/public/downloads/*.exe

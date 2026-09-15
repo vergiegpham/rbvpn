@@ -11,17 +11,22 @@ function DashboardInner() {
   const [user, setUser] = useState(null);
   const [subscription, setSubscription] = useState(null);
   const [devices, setDevices] = useState([]);
+  const [nodes, setNodes] = useState([]);
+  const [selectedNodeId, setSelectedNodeId] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [configText, setConfigText] = useState('');
 
   async function refresh() {
-    const [sub, devs] = await Promise.all([
+    const [sub, devs, nodeList] = await Promise.all([
       api('/api/plans/subscription'),
       api('/api/devices'),
+      api('/api/devices/nodes/list'),
     ]);
     setSubscription(sub.subscription);
     setDevices(devs.devices || []);
+    const list = nodeList.nodes || [];
+    setNodes(list);
+    if (!selectedNodeId && list[0]) setSelectedNodeId(list[0].id);
   }
 
   useEffect(() => {
@@ -56,21 +61,28 @@ function DashboardInner() {
     try {
       await api('/api/devices', {
         method: 'POST',
-        body: { name: `Device-${devices.length + 1}` },
+        body: {
+          name: `Device-${devices.length + 1}`,
+          nodeId: selectedNodeId || undefined,
+        },
       });
       await refresh();
-      setMessage('Device created. Node agent will sync the peer shortly.');
+      setMessage('Device created on selected node. All plans can use every node.');
     } catch (err) {
       setError(err.message);
     }
   }
 
-  async function showConfig(id) {
+  async function switchNode(deviceId, nodeId) {
+    if (!nodeId) return;
     setError('');
     try {
-      const conf = await api(`/api/devices/${id}/config`);
-      setConfigText(conf.conf);
-      setMessage(`Config for ${conf.name} · ${conf.endpoint}`);
+      await api(`/api/devices/${deviceId}/node`, {
+        method: 'POST',
+        body: { nodeId },
+      });
+      await refresh();
+      setMessage('Node switched. Reconnect in the Windows app to use the new server.');
     } catch (err) {
       setError(err.message);
     }
@@ -104,6 +116,7 @@ function DashboardInner() {
                   <strong>{subscription.plan.name}</strong> · active until{' '}
                   {new Date(subscription.endsAt).toLocaleString()}
                 </p>
+                <p className="lead">All active nodes are available on every plan.</p>
                 <Link href="/pricing" className="ghost-btn">
                   Change plan
                 </Link>
@@ -120,54 +133,64 @@ function DashboardInner() {
 
           <div className="panel">
             <h3>Windows app</h3>
-            <p className="lead">Install WireGuard, then run the RB-VPN client and sign in.</p>
+            <p className="lead">Download the RB-VPN .exe, install, and sign in with this account.</p>
             <Link href="/download" className="btn-primary">
-              Download instructions
+              Download app
             </Link>
           </div>
         </div>
 
         <div className="panel" style={{ marginTop: '1rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
             <h3>Devices</h3>
-            <button className="ghost-btn" onClick={addDevice} type="button">
-              Add device
-            </button>
+            <div className="pay-row" style={{ marginTop: 0 }}>
+              <select
+                value={selectedNodeId}
+                onChange={(e) => setSelectedNodeId(e.target.value)}
+                style={{ width: 'auto', minWidth: 180 }}
+              >
+                {nodes.length === 0 && <option value="">No nodes</option>}
+                {nodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name} ({n.region})
+                  </option>
+                ))}
+              </select>
+              <button className="ghost-btn" onClick={addDevice} type="button">
+                Add device
+              </button>
+            </div>
           </div>
-          {devices.length === 0 && <p className="lead">No devices yet.</p>}
+          {devices.length === 0 && (
+            <p className="lead">No devices yet. Pick any node above, or let the Windows app create one.</p>
+          )}
           {devices.map((d) => (
             <div className="device-item" key={d.id}>
               <div>
                 <strong>{d.name}</strong>
                 <div className="lead" style={{ margin: 0 }}>
-                  {d.node?.name} · {d.clientIp} · {d.syncStatus}
+                  {d.node?.name} · {d.node?.region} ·{' '}
+                  {d.syncStatus === 'synced' ? 'ready' : 'provisioning'}
                 </div>
               </div>
               <div className="pay-row">
-                <button className="ghost-btn" type="button" onClick={() => showConfig(d.id)}>
-                  Config
-                </button>
+                <select
+                  defaultValue={d.node?.id || ''}
+                  onChange={(e) => switchNode(d.id, e.target.value)}
+                  style={{ width: 'auto', minWidth: 160 }}
+                >
+                  {nodes.map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.name}
+                    </option>
+                  ))}
+                </select>
                 <button className="ghost-btn" type="button" onClick={() => removeDevice(d.id)}>
                   Remove
                 </button>
               </div>
             </div>
           ))}
-          {configText && (
-            <pre
-              style={{
-                marginTop: '1rem',
-                padding: '0.9rem',
-                background: '#0f1a28',
-                color: '#d7e6ff',
-                borderRadius: '0.75rem',
-                overflow: 'auto',
-                fontSize: '0.8rem',
-              }}
-            >
-              {configText}
-            </pre>
-          )}
         </div>
 
         <button

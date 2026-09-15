@@ -120,6 +120,39 @@ server/vpn-agent/    Polls API and runs `wg set`
 client-windows/      Electron desktop client
 ```
 
+## Deploy local code to VPS
+
+Keep VPS credentials in repo-root `vps info` (gitignored):
+
+```text
+ip : 162.35.175.39
+user : root
+password : YOUR_PASSWORD
+```
+
+After you change local source, sync and restart production services:
+
+```bash
+npm run deploy:vps
+```
+
+Or:
+
+```powershell
+.\deploy.ps1
+```
+
+Useful variants:
+
+```bash
+npm run deploy:vps:web          # website only
+npm run deploy:vps:api          # api + agent only
+python server/scripts/deploy-to-vps.py --skip-build
+```
+
+This uploads to `/opt/rbvpn`, runs install/build as needed, and restarts `rbvpn-api`, `rbvpn-agent`, `rbvpn-web`, `nginx`.  
+VPS `.env` files and databases are **not** overwritten.
+
 ## Production notes
 
 - Change `JWT_SECRET` and `NODE_AGENT_SECRET`
