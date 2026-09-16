@@ -14,8 +14,9 @@ const body = Source_Sans_3({
 });
 
 export const metadata = {
-  title: 'RB-VPN — Secure private access',
-  description: 'RB-VPN routes your traffic through private VPS nodes. Stripe and crypto payments.',
+  title: 'RB-VPN — Stays connected when Astrill drops',
+  description:
+    'RB-VPN keeps a stable exit IP across reconnects, with fewer surprise disconnects than Astrill and steady network speed. Simple Windows app and transparent plans.',
 };
 
 export default function RootLayout({ children }) {

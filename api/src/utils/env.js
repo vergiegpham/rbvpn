@@ -13,4 +13,6 @@ export const env = {
   nowPaymentsIpnSecret: process.env.NOWPAYMENTS_IPN_SECRET || '',
   nowPaymentsSandbox: process.env.NOWPAYMENTS_SANDBOX !== 'false',
   nodeAgentSecret: process.env.NODE_AGENT_SECRET || 'change-me-node-agent-secret',
+  interserverUsername: process.env.INTERSERVER_USERNAME || '',
+  interserverPassword: process.env.INTERSERVER_PASSWORD || process.env.INTERSERVER_API_KEY || '',
 };

@@ -17,6 +17,8 @@ vps-info*
 *.ppk
 client-windows/dist/
 client-windows/dist-build/
+client-windows/dist-out/
 client-windows/vendor/
 client-windows/electron-win.zip
 website/public/downloads/*.exe
+website/public/downloads/*.msi

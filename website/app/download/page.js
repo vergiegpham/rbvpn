@@ -26,10 +26,10 @@ export default function DownloadPage() {
           <div className="panel">
             <h3>Windows</h3>
             <p className="lead">
-              Download <strong>RB-VPN Setup.exe</strong>, install, then open RB-VPN from the
+              Download <strong>RB-VPN Setup.msi</strong>, install, then open RB-VPN from the
               Start menu or desktop shortcut.
             </p>
-            <a className="btn-primary" href="/downloads/RB-VPN-Setup.exe">
+            <a className="btn-primary" href="/downloads/RB-VPN-Setup.msi">
               Download for Windows
             </a>
             <p className="lead" style={{ marginTop: '0.75rem' }}>
@@ -44,15 +44,15 @@ export default function DownloadPage() {
                 <>
                   <li>Buy or extend a plan if you do not have one yet.</li>
                   <li>Install RB-VPN and sign in with this account.</li>
-                  <li>Choose a server node and click Connect.</li>
-                  <li>Confirm your exit IP matches the RB-VPN node.</li>
+                  <li>Choose a location and click Connect.</li>
+                  <li>Confirm your public IP matches the RB-VPN exit.</li>
                 </>
               ) : (
                 <>
                   <li>Create an account and buy a plan.</li>
                   <li>Install RB-VPN and sign in.</li>
                   <li>Click Connect (approve administrator if prompted).</li>
-                  <li>Confirm your exit IP matches the RB-VPN node.</li>
+                  <li>Confirm your public IP matches the RB-VPN exit.</li>
                 </>
               )}
             </ol>

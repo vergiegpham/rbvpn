@@ -15,7 +15,7 @@ Sites see the **VPS public IP**.
 | Piece | Tech |
 |--------|------|
 | Website | Next.js (`website/`) |
-| Control API | Express + Prisma + SQLite (`api/`) |
+| Control API | Express + Prisma + PostgreSQL (`api/`) |
 | Payments | Stripe + NOWPayments (crypto) |
 | VPN node | WireGuard + Node agent (`server/`) |
 | Windows app | Electron + WireGuard for Windows (`client-windows/`) |
@@ -24,12 +24,20 @@ Sites see the **VPS public IP**.
 
 ### 1) API
 
+Requires a local PostgreSQL database (default URL in `.env.example`).
+
 ```bash
 cd api
-cp .env.example .env   # already seeded .env for local dev
+cp .env.example .env   # set DATABASE_URL to your Postgres instance
 npm install
 npm run db:setup
 npm run dev
+```
+
+On Ubuntu/Debian you can provision Postgres with:
+
+```bash
+sudo bash server/scripts/setup-postgres.sh
 ```
 
 API: `http://localhost:4000`  
@@ -156,7 +164,7 @@ VPS `.env` files and databases are **not** overwritten.
 ## Production notes
 
 - Change `JWT_SECRET` and `NODE_AGENT_SECRET`
-- Use Postgres instead of SQLite (`provider = "postgresql"` in Prisma)
+- PostgreSQL is provisioned by `server/scripts/setup-postgres.sh` (also run automatically on API deploy)
 - Put API behind HTTPS; point website `NEXT_PUBLIC_API_URL` at it
 - Register real node public keys (never leave `REPLACE_WITH_SERVER_PUBLIC_KEY`)
 - For restrictive networks, plain WireGuard UDP may be blocked — plan obfuscation/transport upgrades separately

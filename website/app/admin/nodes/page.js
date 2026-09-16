@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AdminShell from '@/components/AdminShell';
 import { api, getStoredUser, getToken } from '@/lib/api';
@@ -18,6 +18,20 @@ const emptyNode = {
   active: true,
 };
 
+const emptyPurchase = {
+  quantity: 2,
+  slices: 1,
+  period: 1,
+  platform: 'kvm',
+  location: '',
+  templateKey: '',
+  hostnamePrefix: 'rbvpn',
+  namePrefix: 'Node',
+  coupon: '',
+  capacity: 250,
+  waitForIp: true,
+};
+
 export default function AdminNodesPage() {
   const router = useRouter();
   const [nodes, setNodes] = useState([]);
@@ -25,10 +39,41 @@ export default function AdminNodesPage() {
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [catalog, setCatalog] = useState(null);
+  const [purchase, setPurchase] = useState(emptyPurchase);
+  const [buying, setBuying] = useState(false);
+  const [credentials, setCredentials] = useState([]);
 
   async function load() {
     const data = await api('/api/admin/nodes');
     setNodes(data.nodes || []);
+  }
+
+  async function loadCatalog() {
+    try {
+      const data = await api('/api/admin/interserver/catalog');
+      setCatalog(data);
+      setPurchase((p) => ({
+        ...p,
+        location: p.location || String(data.locations?.[0]?.id || ''),
+        platform:
+          p.platform ||
+          data.platforms?.find((x) => /kvm/i.test(x.platform))?.platform ||
+          data.platforms?.[0]?.platform ||
+          'kvm',
+        templateKey:
+          p.templateKey ||
+          (data.templates?.[0] ? `${data.templates[0].file}||${data.templates[0].os}` : ''),
+      }));
+    } catch (err) {
+      setCatalog({
+        configured: false,
+        error: err.message,
+        locations: [],
+        platforms: [],
+        templates: [],
+      });
+    }
   }
 
   useEffect(() => {
@@ -41,7 +86,14 @@ export default function AdminNodesPage() {
       return;
     }
     load().catch((err) => setError(err.message));
+    loadCatalog().catch(() => {});
   }, [router]);
+
+  const selectedTemplate = useMemo(() => {
+    if (!catalog?.templates?.length || !purchase.templateKey) return null;
+    const [file, os] = purchase.templateKey.split('||');
+    return catalog.templates.find((t) => t.file === file && t.os === os) || null;
+  }, [catalog, purchase.templateKey]);
 
   function resetForm() {
     setForm(emptyNode);
@@ -126,14 +178,253 @@ export default function AdminNodesPage() {
     }
   }
 
+  async function purchaseVps(e) {
+    e.preventDefault();
+    setError('');
+    setMessage('');
+    setCredentials([]);
+    if (!selectedTemplate) {
+      setError('Select an OS template.');
+      return;
+    }
+    if (!purchase.location) {
+      setError('Select a location.');
+      return;
+    }
+    setBuying(true);
+    try {
+      const result = await api('/api/admin/interserver/purchase', {
+        method: 'POST',
+        body: {
+          quantity: Number(purchase.quantity),
+          slices: Number(purchase.slices),
+          period: Number(purchase.period),
+          platform: purchase.platform,
+          location: Number(purchase.location),
+          os: selectedTemplate.file,
+          version: selectedTemplate.os,
+          hostnamePrefix: purchase.hostnamePrefix,
+          namePrefix: purchase.namePrefix,
+          coupon: purchase.coupon || '',
+          capacity: Number(purchase.capacity),
+          waitForIp: Boolean(purchase.waitForIp),
+          regionLabel:
+            catalog?.locations?.find((l) => String(l.id) === String(purchase.location))?.name ||
+            undefined,
+        },
+      });
+      const okCount = (result.orders || []).filter((o) => o.ok).length;
+      const failCount = (result.orders || []).length - okCount;
+      setCredentials(result.credentials || []);
+      setMessage(
+        `Ordered ${okCount} VPS${failCount ? ` (${failCount} failed)` : ''}. Save root passwords below, then install WireGuard + agent on each host.`
+      );
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBuying(false);
+    }
+  }
+
+  async function importServices() {
+    setError('');
+    setMessage('');
+    try {
+      const result = await api('/api/admin/interserver/import-services', {
+        method: 'POST',
+        body: {},
+      });
+      setMessage(`Imported ${result.count || 0} InterServer VPS as disabled nodes.`);
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   return (
     <AdminShell title="VPN nodes">
       {message && <p className="ok">{message}</p>}
       {error && <p className="error">{error}</p>}
 
       <section className="admin-panel">
+        <h2>Purchase InterServer VPS</h2>
+        {catalog?.error && (
+          <p className="admin-muted">
+            InterServer not ready: {catalog.error}. Set <code>INTERSERVER_USERNAME</code> and{' '}
+            <code>INTERSERVER_PASSWORD</code> (or API key) in <code>api/.env</code>, then restart the
+            API.
+          </p>
+        )}
+        {catalog && !catalog.error && (
+          <p className="admin-muted">
+            Orders charge your InterServer account. New nodes are created as <strong>disabled</strong>{' '}
+            until you install WireGuard and set the server public key.
+          </p>
+        )}
+        <form className="admin-form-grid" onSubmit={purchaseVps}>
+          <label>
+            Quantity
+            <input
+              type="number"
+              min={1}
+              max={20}
+              required
+              value={purchase.quantity}
+              onChange={(e) => setPurchase({ ...purchase, quantity: e.target.value })}
+            />
+          </label>
+          <label>
+            Slices (size)
+            <input
+              type="number"
+              min={1}
+              max={32}
+              required
+              value={purchase.slices}
+              onChange={(e) => setPurchase({ ...purchase, slices: e.target.value })}
+            />
+          </label>
+          <label>
+            Location
+            <select
+              required
+              value={purchase.location}
+              onChange={(e) => setPurchase({ ...purchase, location: e.target.value })}
+            >
+              <option value="">Select…</option>
+              {(catalog?.locations || []).map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Platform
+            <select
+              required
+              value={purchase.platform}
+              onChange={(e) => setPurchase({ ...purchase, platform: e.target.value })}
+            >
+              {(catalog?.platforms || [{ platform: 'kvm', name: 'KVM' }]).map((p) => (
+                <option key={p.platform} value={p.platform}>
+                  {p.name || p.platform}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="admin-span-2">
+            OS template
+            <select
+              required
+              value={purchase.templateKey}
+              onChange={(e) => setPurchase({ ...purchase, templateKey: e.target.value })}
+            >
+              <option value="">Select…</option>
+              {(catalog?.templates || []).map((t) => (
+                <option key={`${t.file}||${t.os}`} value={`${t.file}||${t.os}`}>
+                  {t.title || `${t.os} ${t.version}`} ({t.virtualization || 'linux'})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Hostname prefix
+            <input
+              required
+              value={purchase.hostnamePrefix}
+              onChange={(e) => setPurchase({ ...purchase, hostnamePrefix: e.target.value })}
+              placeholder="rbvpn"
+            />
+          </label>
+          <label>
+            Node name prefix
+            <input
+              value={purchase.namePrefix}
+              onChange={(e) => setPurchase({ ...purchase, namePrefix: e.target.value })}
+              placeholder="Node"
+            />
+          </label>
+          <label>
+            Bill period (months)
+            <input
+              type="number"
+              min={1}
+              max={36}
+              value={purchase.period}
+              onChange={(e) => setPurchase({ ...purchase, period: e.target.value })}
+            />
+          </label>
+          <label>
+            Capacity
+            <input
+              type="number"
+              value={purchase.capacity}
+              onChange={(e) => setPurchase({ ...purchase, capacity: e.target.value })}
+            />
+          </label>
+          <label>
+            Coupon (optional)
+            <input
+              value={purchase.coupon}
+              onChange={(e) => setPurchase({ ...purchase, coupon: e.target.value })}
+            />
+          </label>
+          <label className="admin-check admin-span-2">
+            <input
+              type="checkbox"
+              checked={purchase.waitForIp}
+              onChange={(e) => setPurchase({ ...purchase, waitForIp: e.target.checked })}
+            />
+            Wait for public IP after order (recommended)
+          </label>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={buying || !catalog?.locations?.length}
+          >
+            {buying ? 'Purchasing…' : `Purchase ${purchase.quantity} VPS`}
+          </button>
+          <button type="button" className="ghost-btn" onClick={importServices} disabled={buying}>
+            Import existing InterServer VPS
+          </button>
+        </form>
+
+        {credentials.length > 0 && (
+          <div style={{ marginTop: '1rem' }}>
+            <h3>Root credentials (save now)</h3>
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Hostname</th>
+                  <th>IP</th>
+                  <th>Node ID</th>
+                  <th>Root password</th>
+                </tr>
+              </thead>
+              <tbody>
+                {credentials.map((c) => (
+                  <tr key={c.nodeId}>
+                    <td>{c.hostname}</td>
+                    <td>{c.ip || 'pending'}</td>
+                    <td>
+                      <code style={{ fontSize: '0.75rem' }}>{c.nodeId}</code>
+                    </td>
+                    <td>
+                      <code>{c.rootPassword}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="admin-panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
-          <h2>{editingId ? 'Edit node' : 'Create new node'}</h2>
+          <h2>{editingId ? 'Edit node' : 'Create node manually'}</h2>
           {editingId && (
             <button type="button" className="ghost-btn" onClick={resetForm}>
               Cancel edit
@@ -240,6 +531,7 @@ export default function AdminNodesPage() {
             <tr>
               <th>Name</th>
               <th>Host</th>
+              <th>Provider</th>
               <th>Node ID</th>
               <th>Peers</th>
               <th>Status</th>
@@ -249,8 +541,8 @@ export default function AdminNodesPage() {
           <tbody>
             {nodes.length === 0 && (
               <tr>
-                <td colSpan={6} className="admin-muted">
-                  No nodes yet. Create one above.
+                <td colSpan={7} className="admin-muted">
+                  No nodes yet. Purchase or create one above.
                 </td>
               </tr>
             )}
@@ -262,6 +554,10 @@ export default function AdminNodesPage() {
                 </td>
                 <td>
                   {n.publicHost}:{n.publicPort}
+                </td>
+                <td className="admin-muted">
+                  {n.provider || 'manual'}
+                  {n.provisionStatus ? ` · ${n.provisionStatus}` : ''}
                 </td>
                 <td>
                   <code style={{ fontSize: '0.75rem' }}>{n.id}</code>

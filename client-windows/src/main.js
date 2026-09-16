@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -12,13 +12,53 @@ const CONF_NAME = `${TUNNEL_NAME}.conf`;
 const DEFAULT_API = process.env.RBVPN_API_URL || 'http://162.35.175.39:4000';
 
 let mainWindow = null;
+let tray = null;
+let isQuitting = false;
+let quittingAfterTunnelStop = false;
 
 function confPath() {
   return path.join(app.getPath('userData'), CONF_NAME);
 }
 
-function findTunnelHelper() {
+function tunnelServiceName() {
+  return `WireGuardTunnel$${TUNNEL_NAME}`;
+}
+
+function resolveAppIconPath() {
   const candidates = [
+    path.join(process.resourcesPath || '', 'icon.png'),
+    path.join(__dirname, 'assets', 'icon.png'),
+    path.join(__dirname, '..', 'build', 'icon.png'),
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function loadAppIcon() {
+  const iconPath = resolveAppIconPath();
+  if (!iconPath) return nativeImage.createEmpty();
+  const img = nativeImage.createFromPath(iconPath);
+  return img.isEmpty() ? nativeImage.createEmpty() : img;
+}
+
+function runtimeRootDir() {
+  return path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'RB-VPN');
+}
+
+function runtimeWireGuardDir() {
+  return path.join(runtimeRootDir(), 'WireGuard');
+}
+
+function preferredTunnelHelper() {
+  return path.join(runtimeWireGuardDir(), 'wireguard.exe');
+}
+
+function findTunnelHelper() {
+  // Prefer RB-VPN\WireGuard (bundled location), then legacy default installs.
+  const candidates = [
+    preferredTunnelHelper(),
     path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'WireGuard', 'wireguard.exe'),
     path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'WireGuard', 'wireguard.exe'),
   ];
@@ -28,6 +68,18 @@ function findTunnelHelper() {
   return null;
 }
 
+/** True if the RB-VPN tunnel Windows service exists (running or stopped). */
+async function isTunnelServiceInstalled() {
+  const q = await execFileAsync('sc.exe', ['query', tunnelServiceName()]);
+  return !q.err;
+}
+
+async function isTunnelServiceRunning() {
+  const q = await execFileAsync('sc.exe', ['query', tunnelServiceName()]);
+  if (q.err) return false;
+  return /STATE\s*:\s*\d+\s+RUNNING/i.test(q.stdout);
+}
+
 function progress(step, message) {
   log('info', step, message);
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -35,12 +87,50 @@ function progress(step, message) {
   }
 }
 
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  const icon = loadAppIcon();
+  const trayIcon = icon.isEmpty() ? icon : icon.resize({ width: 16, height: 16 });
+  tray = new Tray(trayIcon.isEmpty() ? icon : trayIcon);
+  tray.setToolTip('RB-VPN');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Open RB-VPN',
+        click: () => showMainWindow(),
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ])
+  );
+  tray.on('double-click', () => showMainWindow());
+  tray.on('click', () => showMainWindow());
+}
+
 function createWindow() {
+  const icon = loadAppIcon();
   mainWindow = new BrowserWindow({
     width: 420,
     height: 640,
     resizable: false,
     title: 'RB-VPN',
+    icon: icon.isEmpty() ? undefined : icon,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -49,14 +139,50 @@ function createWindow() {
   });
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // X button: hide to tray (tunnel stays up until Quit from tray).
+  mainWindow.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
 app.whenReady().then(() => {
   log('info', 'app-ready', { logFile: logPath(), userData: app.getPath('userData') });
+  createTray();
   createWindow();
 });
+
+// Keep process alive in the tray when the window is hidden.
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Do not quit on Windows/Linux — X hides to tray; Quit is from the tray menu.
+});
+
+app.on('activate', () => {
+  showMainWindow();
+});
+
+// Real quit (tray → Quit) tears down the WireGuard service.
+app.on('before-quit', (e) => {
+  isQuitting = true;
+  if (quittingAfterTunnelStop) return;
+  e.preventDefault();
+  quittingAfterTunnelStop = true;
+  stopTunnel({ reason: 'app-quit' })
+    .catch((err) => log('error', 'quit:stop-tunnel', err.message || String(err)))
+    .finally(() => {
+      if (tray) {
+        try {
+          tray.destroy();
+        } catch {
+          // ignore
+        }
+        tray = null;
+      }
+      app.quit();
+    });
 });
 
 ipcMain.handle('get-settings', () => ({
@@ -221,16 +347,106 @@ function elevatedExec(file, args) {
   return elevatedBatch([parts.join(' ')], 'rbvpn-exec');
 }
 
+/**
+ * Write orphan-cleanup script to temp, return elevated batch lines to install it + schtask.
+ * (MSI uninstall cannot run NSIS customUnInstall hooks.)
+ */
+function orphanTunnelCleanupBatchLines(helper) {
+  const cleanupDir = path.join(process.env.ProgramData || 'C:\\ProgramData', 'RB-VPN');
+  const cleanupCmd = path.join(cleanupDir, 'orphan-tunnel-cleanup.cmd');
+  const staging = path.join(app.getPath('temp'), 'rbvpn-orphan-tunnel-cleanup.cmd');
+  const appExe = process.execPath;
+  const body = [
+    '@echo off',
+    `if exist ${quoteCmd(appExe)} exit /b 0`,
+    `if exist ${quoteCmd(helper)} ${quoteCmd(helper)} /uninstalltunnelservice ${quoteCmd(TUNNEL_NAME)}`,
+    'schtasks /Delete /F /TN "RB-VPN Tunnel Cleanup" >nul 2>&1',
+    `del /f /q ${quoteCmd(cleanupCmd)} >nul 2>&1`,
+  ].join('\r\n');
+  try {
+    fs.writeFileSync(staging, body, 'utf8');
+  } catch (err) {
+    log('error', 'cleanup-task:stage-failed', err.message);
+    return [];
+  }
+  return [
+    `mkdir ${quoteCmd(cleanupDir)} >nul 2>&1`,
+    `copy /y ${quoteCmd(staging)} ${quoteCmd(cleanupCmd)} >nul`,
+    `schtasks /Create /F /TN ${quoteCmd('RB-VPN Tunnel Cleanup')} /SC ONLOGON /RL HIGHEST /TR ${quoteCmd(cleanupCmd)}`,
+  ];
+}
+
 /** One UAC: refresh RB-VPN tunnel service using wireguard.exe only. */
 function elevatedApplyTunnel(helper, confFile) {
+  const wg = quoteCmd(helper);
+  const tunnelSvc = tunnelServiceName();
   return elevatedBatch(
     [
-      `${quoteCmd(helper)} /uninstallmanagerservice`,
-      `${quoteCmd(helper)} /uninstalltunnelservice ${quoteCmd(TUNNEL_NAME)}`,
-      `${quoteCmd(helper)} /installtunnelservice ${quoteCmd(confFile)}`,
+      // Avoid "service does not exist" errors when manager/tunnel were never installed.
+      `sc query WireGuardManager >nul 2>&1 && ${wg} /uninstallmanagerservice`,
+      `sc query ${quoteCmd(tunnelSvc)} >nul 2>&1 && ${wg} /uninstalltunnelservice ${quoteCmd(TUNNEL_NAME)}`,
+      `${wg} /installtunnelservice ${quoteCmd(confFile)}`,
+      // Do not auto-start after reboot without the app (prevents leftover VPN after uninstall).
+      `sc config ${quoteCmd(tunnelSvc)} start= demand >nul 2>&1`,
+      ...orphanTunnelCleanupBatchLines(helper),
     ],
     'rbvpn-apply-tunnel'
   );
+}
+
+/** Stop/remove the RB-VPN tunnel service (no-op if not installed). */
+async function stopTunnel({ reason = 'disconnect' } = {}) {
+  progress('disconnect', reason === 'app-quit' ? 'Stopping tunnel before quit…' : 'Disconnecting…');
+  const installed = await isTunnelServiceInstalled();
+  if (!installed) {
+    log('info', 'stop-tunnel:not-installed', { reason });
+    return { ok: true, skipped: true };
+  }
+
+  const helper = findTunnelHelper();
+  if (!helper) {
+    // Last resort: stop/delete service without wireguard.exe
+    const stop = await elevatedBatch(
+      [
+        `sc stop ${quoteCmd(tunnelServiceName())} >nul 2>&1`,
+        `sc delete ${quoteCmd(tunnelServiceName())} >nul 2>&1`,
+      ],
+      'rbvpn-stop-tunnel-sc'
+    );
+    if (stop.err) {
+      return {
+        ok: false,
+        error: 'Could not stop the tunnel (network runtime missing).',
+        detail: stop.stderr || (stop.err && stop.err.message),
+      };
+    }
+    return { ok: true };
+  }
+
+  let result = await elevatedBatch(
+    [
+      `sc query ${quoteCmd(tunnelServiceName())} >nul 2>&1 && ${quoteCmd(helper)} /uninstalltunnelservice ${quoteCmd(TUNNEL_NAME)}`,
+    ],
+    'rbvpn-stop-tunnel'
+  );
+  if (result.err) {
+    result = await execFileAsync(helper, ['/uninstalltunnelservice', TUNNEL_NAME]);
+  }
+  if (result.err) {
+    log('error', 'stop-tunnel:failed', {
+      reason,
+      detail: result.stderr || (result.err && result.err.message),
+    });
+    return {
+      ok: false,
+      error:
+        'Could not stop the tunnel automatically. Approve the administrator prompt, or restart the PC.',
+      detail: result.stderr || (result.err && result.err.message),
+      logFile: logPath(),
+    };
+  }
+  log('info', 'stop-tunnel:ok', { reason });
+  return { ok: true };
 }
 
 function sleep(ms) {
@@ -261,13 +477,13 @@ async function waitForDeviceSynced(deviceId, { timeoutMs = 45000 } = {}) {
 }
 
 async function ensureTunnelRuntime() {
-  let helper = findTunnelHelper();
-  if (helper) {
-    log('info', 'runtime:found', helper);
-    return { ok: true, helper };
+  const preferred = preferredTunnelHelper();
+  if (fs.existsSync(preferred)) {
+    log('info', 'runtime:found', preferred);
+    return { ok: true, helper: preferred };
   }
 
-  progress('runtime', 'Network runtime missing — installing (approve UAC if asked)…');
+  progress('runtime', 'Network runtime missing — installing under RB-VPN…');
   let installer;
   try {
     installer = ensureRuntimeInstaller();
@@ -280,37 +496,43 @@ async function ensureTunnelRuntime() {
     };
   }
 
-  // One UAC: install runtime MSI (hidden from Apps list) + disable tray manager.
-  const wg64 = path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'WireGuard', 'wireguard.exe');
-  const wg86 = path.join(
-    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
-    'WireGuard',
-    'wireguard.exe'
-  );
+  // Administrative extract into Program Files\RB-VPN\WireGuard (not Program Files\WireGuard).
+  const targetRoot = runtimeRootDir();
   progress('runtime', 'Waiting for administrator approval (UAC)…');
   const result = await elevatedBatch(
     [
-      `msiexec /i ${quoteCmd(installer)} /qn /norestart ARPSYSTEMCOMPONENT=1`,
-      `if exist ${quoteCmd(wg64)} ${quoteCmd(wg64)} /uninstallmanagerservice`,
-      `if exist ${quoteCmd(wg86)} ${quoteCmd(wg86)} /uninstallmanagerservice`,
+      `mkdir ${quoteCmd(targetRoot)} >nul 2>&1`,
+      `msiexec /a ${quoteCmd(installer)} /qn TARGETDIR=${quoteCmd(targetRoot)}`,
+      // Drop the copied MSI payload left by administrative install.
+      `del /f /q ${quoteCmd(path.join(targetRoot, 'rbvpn-network-runtime.msi'))} >nul 2>&1`,
+      `del /f /q ${quoteCmd(path.join(targetRoot, path.basename(installer)))} >nul 2>&1`,
+      // If a leftover manager UI service exists from an old default install, disable it.
+      `if exist ${quoteCmd(preferred)} (sc query WireGuardManager >nul 2>&1 && ${quoteCmd(preferred)} /uninstallmanagerservice)`,
     ],
     'rbvpn-install-runtime'
   );
   log('info', 'runtime:install-result', {
     err: result.err && result.err.message,
     stderr: result.stderr,
+    preferred,
+    exists: fs.existsSync(preferred),
   });
 
-  helper = findTunnelHelper();
-  if (!helper) {
+  if (!fs.existsSync(preferred)) {
+    // Fall back to any discoverable helper (legacy Program Files\WireGuard).
+    const helper = findTunnelHelper();
+    if (helper) {
+      log('info', 'runtime:fallback-helper', helper);
+      return { ok: true, helper };
+    }
     return {
       ok: false,
       error:
-        'Could not install network components. Approve the administrator prompt and try again.',
+        'Could not install network components into RB-VPN. Approve the administrator prompt and try again.',
       detail: result.stderr || (result.err && result.err.message),
     };
   }
-  return { ok: true, helper };
+  return { ok: true, helper: preferred };
 }
 
 ipcMain.handle('connect', async () => {
@@ -353,8 +575,12 @@ ipcMain.handle('connect', async () => {
   });
   if (result.err) {
     progress('tunnel', 'Elevated start failed — trying without UAC…');
-    await execFileAsync(runtime.helper, ['/uninstallmanagerservice']);
-    await execFileAsync(runtime.helper, ['/uninstalltunnelservice', TUNNEL_NAME]);
+    await execFileAsync('sc.exe', ['query', 'WireGuardManager']).then(async (q) => {
+      if (!q.err) await execFileAsync(runtime.helper, ['/uninstallmanagerservice']);
+    });
+    await execFileAsync('sc.exe', ['query', `WireGuardTunnel$${TUNNEL_NAME}`]).then(async (q) => {
+      if (!q.err) await execFileAsync(runtime.helper, ['/uninstalltunnelservice', TUNNEL_NAME]);
+    });
     result = await execFileAsync(runtime.helper, ['/installtunnelservice', confPath()]);
     log('info', 'connect:fallback-result', {
       err: result.err && result.err.message,
@@ -377,32 +603,36 @@ ipcMain.handle('connect', async () => {
 });
 
 ipcMain.handle('disconnect', async () => {
-  progress('disconnect', 'Disconnecting…');
-  const helper = findTunnelHelper();
-  if (!helper) return { ok: false, error: 'RB-VPN network runtime not found' };
+  const result = await stopTunnel({ reason: 'disconnect' });
+  if (result.ok) progress('disconnect', 'Disconnected');
+  return { ...result, logFile: logPath() };
+});
 
-  let result = await elevatedExec(helper, ['/uninstalltunnelservice', TUNNEL_NAME]);
-  if (result.err) {
-    result = await execFileAsync(helper, ['/uninstalltunnelservice', TUNNEL_NAME]);
-  }
-  if (result.err) {
-    log('error', 'disconnect:failed', result.stderr || result.err.message);
-    return {
-      ok: false,
-      error: 'Could not stop the tunnel automatically. Try Connect again or restart the app as admin.',
-      detail: result.stderr || result.err.message,
-      logFile: logPath(),
-    };
-  }
-  progress('disconnect', 'Disconnected');
-  return { ok: true, logFile: logPath() };
+ipcMain.handle('tunnel-status', async () => {
+  const installed = await isTunnelServiceInstalled();
+  const running = installed ? await isTunnelServiceRunning() : false;
+  return {
+    installed,
+    running,
+    connected: running,
+    helper: findTunnelHelper(),
+  };
 });
 
 ipcMain.handle('show-conf-path', async () => confPath());
 ipcMain.handle('get-log-path', async () => logPath());
 ipcMain.handle('get-log-tail', async () => ({ path: logPath(), text: readLogTail() }));
-ipcMain.handle('open-log-folder', async () => {
+ipcMain.handle('open-log', async () => {
   const { shell } = require('electron');
-  await shell.showItemInFolder(logPath());
-  return logPath();
+  const p = logPath();
+  // Ensure the file exists so the default editor can open it.
+  if (!fs.existsSync(p)) {
+    fs.writeFileSync(p, '', 'utf8');
+  }
+  const err = await shell.openPath(p);
+  if (err) {
+    log('error', 'open-log:failed', err);
+    return { ok: false, error: err };
+  }
+  return { ok: true };
 });

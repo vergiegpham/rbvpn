@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -55,21 +55,28 @@ model Subscription {
 }
 
 model VpnNode {
-  id            String   @id @default(cuid())
-  name          String
-  region        String
-  publicHost    String
-  publicPort    Int      @default(51820)
-  publicKey     String
-  interfaceName String   @default("wg0")
-  subnetCidr    String   @default("10.10.0.0/24")
-  gatewayIp     String   @default("10.10.0.1")
-  nextClientIp  Int      @default(2)
-  capacity      Int      @default(250)
-  active        Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  devices       Device[]
+  id             String   @id @default(cuid())
+  name           String
+  region         String
+  publicHost     String
+  publicPort     Int      @default(51820)
+  publicKey      String
+  interfaceName  String   @default("wg0")
+  subnetCidr     String   @default("10.10.0.0/24")
+  gatewayIp      String   @default("10.10.0.1")
+  nextClientIp   Int      @default(2)
+  capacity       Int      @default(250)
+  active         Boolean  @default(true)
+  provider       String?
+  providerRef    String?
+  provisionStatus String? @default("ready")
+  providerMeta   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  devices        Device[]
+
+  @@index([provider, providerRef])
+  @@index([provisionStatus])
 }
 
 model Device {

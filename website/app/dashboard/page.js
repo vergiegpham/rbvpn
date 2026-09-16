@@ -133,7 +133,7 @@ function DashboardInner() {
 
           <div className="panel">
             <h3>Windows app</h3>
-            <p className="lead">Download the RB-VPN .exe, install, and sign in with this account.</p>
+            <p className="lead">Download the RB-VPN .msi, install, and sign in with this account.</p>
             <Link href="/download" className="btn-primary">
               Download app
             </Link>

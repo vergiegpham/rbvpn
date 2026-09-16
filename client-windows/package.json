@@ -38,39 +38,32 @@
         "filter": [
           "rbvpn-network-runtime.msi"
         ]
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "win": {
+      "icon": "build/icon.png",
+      "requestedExecutionLevel": "requireAdministrator",
+      "signAndEditExecutable": true,
       "target": [
         {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
+          "target": "msi",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "RB-VPN-Setup-${version}.${ext}",
-      "signAndEditExecutable": false
+      "artifactName": "RB-VPN-Setup-${version}.${ext}"
     },
-    "nsis": {
+    "msi": {
       "oneClick": false,
       "perMachine": true,
-      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "RB-VPN",
-      "differentialPackage": false,
-      "include": "build/installer.nsh",
       "runAfterFinish": true
-    },
-    "portable": {
-      "artifactName": "RB-VPN-Portable-${version}.${ext}"
     }
   }
 }

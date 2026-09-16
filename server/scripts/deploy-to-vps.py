@@ -168,11 +168,41 @@ def main() -> None:
     run(client, f"mkdir -p {REMOTE_ROOT} && rm -f {remote_tgz}.bad; tar -xzf {remote_tgz} -C {REMOTE_ROOT}")
 
     if "api" in targets:
+        # Ensure PostgreSQL is installed and api/.env DATABASE_URL points at it.
+        run(
+            client,
+            f"bash {REMOTE_ROOT}/server/scripts/setup-postgres.sh",
+            timeout=900,
+        )
         if not args.skip_install:
             run(client, f"cd {REMOTE_ROOT}/api && npm install --omit=dev")
         run(client, f"cd {REMOTE_ROOT}/api && npx prisma generate")
         # schema sync only; does not wipe data on additive changes
         run(client, f"cd {REMOTE_ROOT}/api && npx prisma db push")
+        # One-time: copy existing SQLite prod data into Postgres if still present
+        run(
+            client,
+            "apt-get install -y python3-psycopg2 >/dev/null 2>&1 || "
+            "apt-get install -y python3-pip >/dev/null 2>&1; "
+            "python3 -m pip install --quiet psycopg2-binary 2>/dev/null || true",
+            timeout=300,
+        )
+        run(
+            client,
+            f"cd {REMOTE_ROOT} && "
+            "SQLITE_DB=/opt/rbvpn/api/prisma/prod.db; "
+            "if [ -f \"$SQLITE_DB\" ]; then "
+            "  DBURL=$(grep -E '^DATABASE_URL=' /opt/rbvpn/api/.env | head -1 | sed -E 's/^DATABASE_URL=//; s/^\"//; s/\"$//'); "
+            "  if python3 server/scripts/migrate-sqlite-to-postgres.py "
+            "--sqlite \"$SQLITE_DB\" --database-url \"$DBURL\"; then "
+            "    mv \"$SQLITE_DB\" \"${SQLITE_DB}.migrated-$(date +%Y%m%d%H%M%S)\"; "
+            "    echo 'SQLite archived after successful migration'; "
+            "  else "
+            "    echo 'SQLite migration failed — left prod.db in place'; exit 1; "
+            "  fi; "
+            "else echo 'No SQLite prod.db to migrate'; fi",
+            timeout=300,
+        )
 
     if "agent" in targets and not args.skip_install:
         run(client, f"cd {REMOTE_ROOT}/server/vpn-agent && npm install --omit=dev")
@@ -209,9 +239,9 @@ def main() -> None:
         run(client, "systemctl is-active " + " ".join(services))
 
     # Upload Windows installer only when content changed (skip identical SHA256)
-    local_setup = ROOT / "website" / "public" / "downloads" / "RB-VPN-Setup.exe"
+    local_setup = ROOT / "website" / "public" / "downloads" / "RB-VPN-Setup.msi"
     if "website" in targets and local_setup.exists():
-        remote_setup = "/var/www/rbvpn-downloads/RB-VPN-Setup.exe"
+        remote_setup = "/var/www/rbvpn-downloads/RB-VPN-Setup.msi"
         local_sha = hashlib.sha256(local_setup.read_bytes()).hexdigest()
         remote_sha = ""
         try:
@@ -234,8 +264,10 @@ def main() -> None:
             run(client, "mkdir -p /var/www/rbvpn-downloads")
             sftp.put(str(local_setup), remote_setup)
             print("Installer uploaded to /var/www/rbvpn-downloads/")
+            # Remove legacy .exe download if present
+            run(client, "rm -f /var/www/rbvpn-downloads/RB-VPN-Setup.exe || true")
     elif "website" in targets:
-        print("No local RB-VPN-Setup.exe — skip installer upload")
+        print("No local RB-VPN-Setup.msi — skip installer upload")
 
     if "api" in targets:
         run(client, f"cd {REMOTE_ROOT}/api && node prisma/seed.js || true")
@@ -244,7 +276,7 @@ def main() -> None:
     run(client, "curl -s -o /dev/null -w 'site:%{http_code}\\n' http://127.0.0.1/ || true")
     run(
         client,
-        "curl -sI http://127.0.0.1/downloads/RB-VPN-Setup.exe | head -n 5 || true",
+        "curl -sI http://127.0.0.1/downloads/RB-VPN-Setup.msi | head -n 5 || true",
     )
     print(f"\nDone. Website: http://{info['host']}/")
     print(f"API health: http://{info['host']}:4000/health")

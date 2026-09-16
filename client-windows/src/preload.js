@@ -10,10 +10,11 @@ contextBridge.exposeInMainWorld('rbvpn', {
   ensureDevice: (opts) => ipcRenderer.invoke('ensure-device', opts || {}),
   connect: () => ipcRenderer.invoke('connect'),
   disconnect: () => ipcRenderer.invoke('disconnect'),
+  tunnelStatus: () => ipcRenderer.invoke('tunnel-status'),
   showConfPath: () => ipcRenderer.invoke('show-conf-path'),
   getLogPath: () => ipcRenderer.invoke('get-log-path'),
   getLogTail: () => ipcRenderer.invoke('get-log-tail'),
-  openLogFolder: () => ipcRenderer.invoke('open-log-folder'),
+  openLog: () => ipcRenderer.invoke('open-log'),
   onConnectProgress: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('connect-progress', handler);

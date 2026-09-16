@@ -333,6 +333,270 @@ router.delete('/nodes/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+function nextSubnet(existing) {
+  const used = new Set(existing.map((n) => n.subnetCidr));
+  for (let i = 0; i < 250; i++) {
+    const subnetCidr = `10.10.${i}.0/24`;
+    if (!used.has(subnetCidr)) {
+      return { subnetCidr, gatewayIp: `10.10.${i}.1` };
+    }
+  }
+  throw new Error('No free 10.10.x.0/24 subnet left');
+}
+
+router.get('/interserver/status', async (_req, res) => {
+  const { interserverConfigured } = await import('../services/interserver.js');
+  res.json({ configured: interserverConfigured() });
+});
+
+router.get('/interserver/catalog', async (_req, res) => {
+  try {
+    const { getCatalog } = await import('../services/interserver.js');
+    const catalog = await getCatalog();
+    res.json(catalog);
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+router.get('/interserver/services', async (_req, res) => {
+  try {
+    const { listVpsServices } = await import('../services/interserver.js');
+    const services = await listVpsServices();
+    res.json({ services });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+router.post('/interserver/validate', async (req, res) => {
+  const schema = z.object({
+    os: z.string().min(1),
+    version: z.string().min(1),
+    slices: z.coerce.number().int().min(1).max(32),
+    platform: z.string().min(1),
+    controlpanel: z.string().default('none'),
+    period: z.coerce.number().int().min(1).max(36).default(1),
+    location: z.coerce.number().int().positive(),
+    hostname: z.string().min(1),
+    coupon: z.string().optional(),
+    rootpass: z.string().min(8).optional(),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid order fields' });
+
+  try {
+    const { validateBuyVps, generateRootPassword } = await import('../services/interserver.js');
+    const rootpass = parsed.data.rootpass || generateRootPassword();
+    const result = await validateBuyVps({ ...parsed.data, rootpass });
+    res.json({ result, rootpassPreview: rootpass ? '(generated)' : null });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+router.post('/interserver/purchase', async (req, res) => {
+  const schema = z.object({
+    quantity: z.coerce.number().int().min(1).max(20).default(1),
+    os: z.string().min(1),
+    version: z.string().min(1),
+    slices: z.coerce.number().int().min(1).max(32).default(1),
+    platform: z.string().min(1).default('kvm'),
+    controlpanel: z.string().default('none'),
+    period: z.coerce.number().int().min(1).max(36).default(1),
+    location: z.coerce.number().int().positive(),
+    hostnamePrefix: z.string().min(1).max(40),
+    regionLabel: z.string().min(1).optional(),
+    coupon: z.string().optional().default(''),
+    namePrefix: z.string().min(1).optional(),
+    capacity: z.coerce.number().int().positive().default(250),
+    waitForIp: z.boolean().default(true),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid purchase fields', detail: parsed.error.flatten() });
+  }
+
+  const {
+    validateBuyVps,
+    buyVps,
+    generateRootPassword,
+    findServiceByHostname,
+    getCatalog,
+  } = await import('../services/interserver.js');
+
+  try {
+    const data = parsed.data;
+    const catalog = await getCatalog();
+    const locationName =
+      data.regionLabel ||
+      catalog.locations.find((l) => l.id === data.location)?.name ||
+      `loc-${data.location}`;
+
+    const prefix = data.hostnamePrefix
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+    const namePrefix = (data.namePrefix || prefix).slice(0, 40);
+
+    // Validate first order shape before charging multiple times
+    const samplePass = generateRootPassword();
+    const sampleHost = `${prefix}-1`;
+    const validation = await validateBuyVps({
+      os: data.os,
+      version: data.version,
+      slices: data.slices,
+      platform: data.platform,
+      controlpanel: data.controlpanel,
+      period: data.period,
+      location: data.location,
+      hostname: sampleHost,
+      coupon: data.coupon,
+      rootpass: samplePass,
+    });
+    const status = String(validation?.status || '').toLowerCase();
+    if (status && status !== 'ok') {
+      return res.status(400).json({
+        error: validation?.status_text || 'InterServer order validation failed',
+        validation,
+      });
+    }
+
+    const existing = await prisma.vpnNode.findMany({ select: { subnetCidr: true } });
+    const usedSubnets = [...existing];
+    const orders = [];
+    const credentials = [];
+
+    for (let i = 1; i <= data.quantity; i++) {
+      const hostname = `${prefix}-${i}`;
+      const rootpass = generateRootPassword();
+      const buyResult = await buyVps({
+        os: data.os,
+        version: data.version,
+        slices: data.slices,
+        platform: data.platform,
+        controlpanel: data.controlpanel,
+        period: data.period,
+        location: data.location,
+        hostname,
+        coupon: data.coupon,
+        rootpass,
+      });
+
+      const buyStatus = String(buyResult?.status || '').toLowerCase();
+      if (buyStatus === 'error' || (buyStatus && buyStatus !== 'ok')) {
+        orders.push({
+          hostname,
+          ok: false,
+          error: buyResult?.status_text || 'Buy failed',
+          buyResult,
+        });
+        continue;
+      }
+
+      let service = null;
+      if (data.waitForIp) {
+        service = await findServiceByHostname(hostname, { attempts: 8, delayMs: 4000 });
+      }
+
+      const subnet = nextSubnet(usedSubnets);
+      usedSubnets.push(subnet);
+
+      const node = await prisma.vpnNode.create({
+        data: {
+          name: `${namePrefix} ${i}`,
+          region: locationName,
+          publicHost: service?.ip || 'pending',
+          publicPort: 51820,
+          publicKey: 'REPLACE_WITH_SERVER_PUBLIC_KEY',
+          interfaceName: 'wg0',
+          subnetCidr: subnet.subnetCidr,
+          gatewayIp: subnet.gatewayIp,
+          capacity: data.capacity,
+          active: false,
+          provider: 'interserver',
+          providerRef: service?.vpsId ? String(service.vpsId) : null,
+          provisionStatus: service?.ip ? 'ordered' : 'provisioning',
+          providerMeta: JSON.stringify({
+            hostname,
+            slices: data.slices,
+            platform: data.platform,
+            locationId: data.location,
+            invoices: buyResult?.invoices || null,
+            cost: buyResult?.cost ?? validation?.monthly_service_cost ?? null,
+            orderedAt: new Date().toISOString(),
+          }),
+        },
+      });
+
+      credentials.push({ nodeId: node.id, hostname, rootPassword: rootpass, ip: service?.ip || null });
+      orders.push({
+        hostname,
+        ok: true,
+        node,
+        buyResult,
+        service,
+      });
+    }
+
+    res.status(201).json({
+      ok: true,
+      validation,
+      orders,
+      credentials,
+      note:
+        'Save root passwords now — they are not stored. Install WireGuard + vpn-agent on each VPS, then set publicKey and enable the node.',
+    });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
+router.post('/interserver/import-services', async (req, res) => {
+  try {
+    const { listVpsServices } = await import('../services/interserver.js');
+    const services = await listVpsServices();
+    const existing = await prisma.vpnNode.findMany({
+      where: { provider: 'interserver' },
+      select: { providerRef: true, subnetCidr: true, publicHost: true },
+    });
+    const knownRefs = new Set(existing.map((n) => n.providerRef).filter(Boolean));
+    const knownHosts = new Set(existing.map((n) => n.publicHost));
+    const usedSubnets = await prisma.vpnNode.findMany({ select: { subnetCidr: true } });
+
+    const created = [];
+    for (const svc of services) {
+      if (!svc.ip || !svc.vpsId) continue;
+      if (knownRefs.has(String(svc.vpsId)) || knownHosts.has(svc.ip)) continue;
+      const subnet = nextSubnet(usedSubnets);
+      usedSubnets.push(subnet);
+      const node = await prisma.vpnNode.create({
+        data: {
+          name: svc.hostname || `InterServer ${svc.vpsId}`,
+          region: 'interserver',
+          publicHost: svc.ip,
+          publicPort: 51820,
+          publicKey: 'REPLACE_WITH_SERVER_PUBLIC_KEY',
+          subnetCidr: subnet.subnetCidr,
+          gatewayIp: subnet.gatewayIp,
+          active: false,
+          provider: 'interserver',
+          providerRef: String(svc.vpsId),
+          provisionStatus: 'imported',
+          providerMeta: JSON.stringify(svc),
+        },
+      });
+      knownRefs.add(String(svc.vpsId));
+      knownHosts.add(svc.ip);
+      created.push(node);
+    }
+    res.json({ created, count: created.length });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
+  }
+});
+
 router.get('/messages', async (req, res) => {
   const status = String(req.query.status || '').trim();
   const messages = await prisma.contactMessage.findMany({

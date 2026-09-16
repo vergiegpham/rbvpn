@@ -3,7 +3,6 @@ const appView = document.getElementById('view-app');
 const statusPill = document.getElementById('status-pill');
 const loginError = document.getElementById('login-error');
 const appMsg = document.getElementById('app-msg');
-const logHint = document.getElementById('log-hint');
 const subLine = document.getElementById('sub-line');
 const userEmail = document.getElementById('user-email');
 const nodeSelect = document.getElementById('nodeSelect');
@@ -16,15 +15,6 @@ function setConnected(on) {
   statusPill.classList.toggle('off', !on);
   document.getElementById('btn-connect').classList.toggle('hidden', on);
   document.getElementById('btn-disconnect').classList.toggle('hidden', !on);
-}
-
-async function refreshLogHint() {
-  try {
-    const p = await window.rbvpn.getLogPath();
-    logHint.textContent = `Log: ${p}`;
-  } catch {
-    logHint.textContent = '';
-  }
 }
 
 async function loadNodes(preferredId) {
@@ -61,9 +51,17 @@ async function showApp(email) {
   userEmail.textContent = email || '';
   appMsg.textContent = '';
   setConnected(false);
-  await refreshLogHint();
   const settings = await window.rbvpn.getSettings();
   await loadNodes(settings.nodeId);
+  try {
+    const status = await window.rbvpn.tunnelStatus();
+    if (status.connected) {
+      setConnected(true);
+      appMsg.textContent = 'Tunnel still active from a previous session.';
+    }
+  } catch {
+    // ignore
+  }
   try {
     const { subscription } = await window.rbvpn.fetchSubscription();
     if (!subscription) {
@@ -118,7 +116,7 @@ nodeSelect.addEventListener('change', async () => {
 });
 
 document.getElementById('btn-open-log').addEventListener('click', async () => {
-  await window.rbvpn.openLogFolder();
+  await window.rbvpn.openLog();
 });
 
 document.getElementById('btn-connect').addEventListener('click', async () => {
@@ -133,7 +131,6 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
     await window.rbvpn.saveSettings({ nodeId });
     const config = await window.rbvpn.ensureDevice({ nodeId });
     const result = await window.rbvpn.connect();
-    await refreshLogHint();
     if (!result.ok) {
       appMsg.textContent = result.error + (result.detail ? `\n${result.detail}` : '');
       setConnected(false);
@@ -144,7 +141,6 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
   } catch (err) {
     setConnected(false);
     appMsg.textContent = err.message;
-    await refreshLogHint();
   } finally {
     if (unsubProgress) {
       unsubProgress();
@@ -162,7 +158,6 @@ document.getElementById('btn-disconnect').addEventListener('click', async () => 
   const result = await window.rbvpn.disconnect();
   setConnected(false);
   appMsg.textContent = result.ok ? 'Disconnected' : result.error || 'Disconnected';
-  await refreshLogHint();
   if (unsubProgress) {
     unsubProgress();
     unsubProgress = null;
