@@ -7,6 +7,8 @@ import {
   deleteDevice,
   getDeviceConfig,
   switchDeviceNode,
+  startDeviceSession,
+  endDeviceSession,
 } from '../services/devices.js';
 import { prisma } from '../utils/db.js';
 
@@ -41,6 +43,7 @@ router.post('/', authRequired, async (req, res) => {
     const schema = z.object({
       name: z.string().min(1).max(80).optional(),
       nodeId: z.string().optional(),
+      replace: z.boolean().optional(),
     });
     const parsed = schema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
@@ -84,6 +87,26 @@ router.post('/:id/node', authRequired, async (req, res) => {
         },
       },
     });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** Server allocates a free IP and queues the WireGuard peer on the node. */
+router.post('/:id/connect', authRequired, async (req, res) => {
+  try {
+    const config = await startDeviceSession(req.user.sub, req.params.id);
+    res.json(config);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** Server frees the IP and removes the peer from the node (device stays registered). */
+router.post('/:id/disconnect', authRequired, async (req, res) => {
+  try {
+    const result = await endDeviceSession(req.user.sub, req.params.id);
+    res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

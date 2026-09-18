@@ -9,30 +9,43 @@
 
     StrCpy $0 "$PROGRAMFILES64\RB-VPN\WireGuard\wireguard.exe"
     IfFileExists $0 0 skip_mgr
-      nsExec::Exec 'sc query WireGuardManager'
+      ; Silent — do not call wireguard /uninstall* (MessageBox if service missing).
+      nsExec::ExecToStack 'sc stop WireGuardManager'
       Pop $1
-      StrCmp $1 "0" 0 skip_mgr
-        ExecWait '"$0" /uninstallmanagerservice'
+      Pop $1
+      nsExec::ExecToStack 'sc delete WireGuardManager'
+      Pop $1
+      Pop $1
     skip_mgr:
   skip_runtime:
 !macroend
 
 !macro customUnInstall
   DetailPrint "Stopping RB-VPN tunnel..."
-  StrCpy $0 ""
-  IfFileExists "$PROGRAMFILES64\RB-VPN\WireGuard\wireguard.exe" 0 +2
-    StrCpy $0 "$PROGRAMFILES64\RB-VPN\WireGuard\wireguard.exe"
-  StrCmp $0 "" 0 +3
-    IfFileExists "$PROGRAMFILES64\WireGuard\wireguard.exe" 0 skip_tun
-      StrCpy $0 "$PROGRAMFILES64\WireGuard\wireguard.exe"
-  nsExec::Exec 'sc query WireGuardTunnel$RB-VPN'
+  ; NSIS: use $$ for a literal $. Service name is WireGuardTunnel$RB-VPN.
+  nsExec::ExecToStack 'sc stop WireGuardTunnel$$RB-VPN'
   Pop $1
-  StrCmp $1 "0" 0 skip_tun
-    ExecWait '"$0" /uninstalltunnelservice RB-VPN'
-  skip_tun:
-  nsExec::Exec 'schtasks /Delete /F /TN "RB-VPN Tunnel Cleanup"'
+  Pop $1
+  nsExec::ExecToStack 'sc delete WireGuardTunnel$$RB-VPN'
+  Pop $1
+  Pop $1
+  nsExec::ExecToStack 'sc stop WireGuardManager'
+  Pop $1
+  Pop $1
+  nsExec::ExecToStack 'sc delete WireGuardManager'
+  Pop $1
+  Pop $1
+
+  ; Remove leftover default WireGuard install (creates Data\log.bin).
+  RMDir /r "$PROGRAMFILES64\WireGuard"
+
+  nsExec::ExecToStack 'schtasks /Delete /F /TN "RB-VPN Tunnel Cleanup"'
+  Pop $1
   Pop $1
   Delete "$COMMONPROGRAMDATA\RB-VPN\orphan-tunnel-cleanup.cmd"
   RMDir "$COMMONPROGRAMDATA\RB-VPN"
   RMDir /r "$PROGRAMFILES64\RB-VPN\WireGuard"
+  ; Electron userData (package.json name) — login token, conf, logs
+  SetShellVarContext current
+  RMDir /r "$APPDATA\rbvpn-windows"
 !macroend

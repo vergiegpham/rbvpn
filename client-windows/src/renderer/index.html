@@ -20,6 +20,11 @@
         <input id="email" type="email" autocomplete="username" />
         <label>Password</label>
         <input id="password" type="password" autocomplete="current-password" />
+        <div class="opts">
+          <label class="check"><input id="savePassword" type="checkbox" /> Save password</label>
+          <label class="check"><input id="autoLogin" type="checkbox" /> Auto-login when launching</label>
+          <label class="check"><input id="openAtLogin" type="checkbox" /> Start with Windows</label>
+        </div>
         <details class="advanced">
           <summary>Advanced</summary>
           <label>Server</label>
@@ -41,6 +46,14 @@
             <button id="btn-disconnect" class="ghost hidden">Disconnect</button>
           </div>
           <p id="app-msg" class="muted"></p>
+          <details class="advanced">
+            <summary>Options</summary>
+            <div class="opts">
+              <label class="check"><input id="opt-savePassword" type="checkbox" /> Save password</label>
+              <label class="check"><input id="opt-autoLogin" type="checkbox" /> Auto-login when launching</label>
+              <label class="check"><input id="opt-openAtLogin" type="checkbox" /> Start with Windows</label>
+            </div>
+          </details>
           <button id="btn-open-log" class="link" type="button">Open connect log</button>
         </div>
         <button id="btn-logout" class="link">Log out</button>

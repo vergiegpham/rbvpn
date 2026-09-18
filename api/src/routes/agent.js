@@ -16,7 +16,7 @@ router.get('/peers', nodeAgentRequired, async (req, res) => {
   const pending = await prisma.device.findMany({
     where: {
       nodeId,
-      syncStatus: { in: ['pending', 'delete_pending'] },
+      syncStatus: { in: ['pending', 'delete_pending', 'release_pending'] },
     },
     select: {
       id: true,
@@ -52,9 +52,26 @@ router.post('/peers/ack', nodeAgentRequired, async (req, res) => {
     });
   }
   if (parsed.data.deleted.length) {
-    await prisma.device.deleteMany({
+    const rows = await prisma.device.findMany({
       where: { id: { in: parsed.data.deleted } },
+      select: { id: true, syncStatus: true },
     });
+    const toRelease = rows.filter((r) => r.syncStatus === 'release_pending').map((r) => r.id);
+    const toDelete = rows.filter((r) => r.syncStatus !== 'release_pending').map((r) => r.id);
+
+    // Disconnect: free IP, keep device identity for next connect.
+    if (toRelease.length) {
+      await prisma.device.updateMany({
+        where: { id: { in: toRelease } },
+        data: { syncStatus: 'idle', clientIp: null },
+      });
+    }
+    // Hard delete / node switch ghost peers.
+    if (toDelete.length) {
+      await prisma.device.deleteMany({
+        where: { id: { in: toDelete } },
+      });
+    }
   }
   res.json({ ok: true });
 });

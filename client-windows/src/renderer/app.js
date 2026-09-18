@@ -7,6 +7,13 @@ const subLine = document.getElementById('sub-line');
 const userEmail = document.getElementById('user-email');
 const nodeSelect = document.getElementById('nodeSelect');
 
+const elSavePassword = document.getElementById('savePassword');
+const elAutoLogin = document.getElementById('autoLogin');
+const elOpenAtLogin = document.getElementById('openAtLogin');
+const optSavePassword = document.getElementById('opt-savePassword');
+const optAutoLogin = document.getElementById('opt-autoLogin');
+const optOpenAtLogin = document.getElementById('opt-openAtLogin');
+
 let unsubProgress = null;
 
 function setConnected(on) {
@@ -15,6 +22,32 @@ function setConnected(on) {
   statusPill.classList.toggle('off', !on);
   document.getElementById('btn-connect').classList.toggle('hidden', on);
   document.getElementById('btn-disconnect').classList.toggle('hidden', !on);
+}
+
+function applyPrefsToUi(prefs = {}) {
+  const savePassword = !!prefs.savePassword;
+  const autoLogin = !!prefs.autoLogin;
+  const openAtLogin = !!prefs.openAtLogin;
+  elSavePassword.checked = savePassword;
+  elAutoLogin.checked = autoLogin;
+  elOpenAtLogin.checked = openAtLogin;
+  optSavePassword.checked = savePassword;
+  optAutoLogin.checked = autoLogin;
+  optOpenAtLogin.checked = openAtLogin;
+}
+
+async function persistPrefsFrom(source) {
+  const savePassword = source.savePassword.checked;
+  const autoLogin = source.autoLogin.checked;
+  const openAtLogin = source.openAtLogin.checked;
+  // Auto-login requires a saved password.
+  if (autoLogin && !savePassword) source.savePassword.checked = true;
+  const prefs = await window.rbvpn.saveSettings({
+    savePassword: source.savePassword.checked,
+    autoLogin,
+    openAtLogin,
+  });
+  applyPrefsToUi(prefs);
 }
 
 async function loadNodes(preferredId) {
@@ -45,13 +78,15 @@ async function loadNodes(preferredId) {
   }
 }
 
-async function showApp(email) {
+async function showApp(email, prefs) {
   loginView.classList.add('hidden');
   appView.classList.remove('hidden');
   userEmail.textContent = email || '';
   appMsg.textContent = '';
   setConnected(false);
+  if (prefs) applyPrefsToUi(prefs);
   const settings = await window.rbvpn.getSettings();
+  applyPrefsToUi(settings);
   await loadNodes(settings.nodeId);
   try {
     const status = await window.rbvpn.tunnelStatus();
@@ -75,32 +110,44 @@ async function showApp(email) {
   }
 }
 
-function showLogin() {
+async function showLogin(settings) {
   appView.classList.add('hidden');
   loginView.classList.remove('hidden');
   setConnected(false);
+  const s = settings || (await window.rbvpn.getSettings());
+  document.getElementById('apiUrl').value = s.apiUrl || 'http://162.35.175.39:4000';
+  document.getElementById('email').value = s.email || '';
+  document.getElementById('password').value = s.savePassword ? s.password || '' : '';
+  applyPrefsToUi(s);
 }
 
 async function boot() {
-  const settings = await window.rbvpn.getSettings();
-  document.getElementById('apiUrl').value = settings.apiUrl || 'http://162.35.175.39:4000';
-  document.getElementById('email').value = settings.email || '';
-  if (settings.token) {
-    await showApp(settings.email);
-  } else {
-    showLogin();
+  const result = await window.rbvpn.tryAutoLogin();
+  applyPrefsToUi(result.prefs || {});
+  if (result.ok && result.user) {
+    await showApp(result.user.email, result.prefs);
+    return;
   }
+  await showLogin({
+    ...(await window.rbvpn.getSettings()),
+    ...(result.prefs || {}),
+    email: result.email || '',
+  });
+  if (result.error) loginError.textContent = result.error;
 }
 
 document.getElementById('btn-login').addEventListener('click', async () => {
   loginError.textContent = '';
   try {
-    const user = await window.rbvpn.login({
+    const { user, prefs } = await window.rbvpn.login({
       email: document.getElementById('email').value.trim(),
       password: document.getElementById('password').value,
       apiUrl: document.getElementById('apiUrl').value.trim(),
+      savePassword: elSavePassword.checked,
+      autoLogin: elAutoLogin.checked,
+      openAtLogin: elOpenAtLogin.checked,
     });
-    await showApp(user.email);
+    await showApp(user.email, prefs);
   } catch (err) {
     loginError.textContent = err.message;
   }
@@ -108,7 +155,34 @@ document.getElementById('btn-login').addEventListener('click', async () => {
 
 document.getElementById('btn-logout').addEventListener('click', async () => {
   await window.rbvpn.logout();
-  showLogin();
+  await showLogin();
+});
+
+elAutoLogin.addEventListener('change', () => {
+  if (elAutoLogin.checked) elSavePassword.checked = true;
+});
+optAutoLogin.addEventListener('change', async () => {
+  if (optAutoLogin.checked) optSavePassword.checked = true;
+  await persistPrefsFrom({
+    savePassword: optSavePassword,
+    autoLogin: optAutoLogin,
+    openAtLogin: optOpenAtLogin,
+  });
+});
+optSavePassword.addEventListener('change', async () => {
+  if (!optSavePassword.checked) optAutoLogin.checked = false;
+  await persistPrefsFrom({
+    savePassword: optSavePassword,
+    autoLogin: optAutoLogin,
+    openAtLogin: optOpenAtLogin,
+  });
+});
+optOpenAtLogin.addEventListener('change', async () => {
+  await persistPrefsFrom({
+    savePassword: optSavePassword,
+    autoLogin: optAutoLogin,
+    openAtLogin: optOpenAtLogin,
+  });
 });
 
 nodeSelect.addEventListener('change', async () => {

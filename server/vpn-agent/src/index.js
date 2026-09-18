@@ -37,6 +37,10 @@ async function syncOnce() {
 
   for (const peer of data.peers) {
     if (peer.syncStatus === 'pending') {
+      if (!peer.clientIp) {
+        console.warn(`Skipping peer ${peer.id}: pending without clientIp`);
+        continue;
+      }
       wg([
         'set',
         iface,
@@ -47,10 +51,12 @@ async function syncOnce() {
       ]);
       applied.push(peer.id);
       console.log(`Applied peer ${peer.id} (${peer.clientIp})`);
-    } else if (peer.syncStatus === 'delete_pending') {
+    } else if (peer.syncStatus === 'delete_pending' || peer.syncStatus === 'release_pending') {
       wg(['set', iface, 'peer', peer.clientPublicKey, 'remove']);
       deleted.push(peer.id);
-      console.log(`Removed peer ${peer.id}`);
+      console.log(
+        `${peer.syncStatus === 'release_pending' ? 'Released' : 'Removed'} peer ${peer.id}`
+      );
     }
   }
 

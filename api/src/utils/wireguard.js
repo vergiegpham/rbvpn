@@ -36,16 +36,20 @@ export function ipFromIndex(gatewayIp, index) {
 export function buildClientConfig({
   privateKey,
   address,
-  dns = '1.1.1.1',
+  dns = '8.8.8.8',
   serverPublicKey,
   endpoint,
   allowedIps = '0.0.0.0/0',
+  mtu = 1280,
 }) {
+  // /24 puts the client on the VPN LAN (gateway + peers); server still pins each peer as ip/32.
+  const ifaceAddress = String(address).includes('/') ? address : `${address}/24`;
   return [
     '[Interface]',
     `PrivateKey = ${privateKey}`,
-    `Address = ${address}/32`,
+    `Address = ${ifaceAddress}`,
     `DNS = ${dns}`,
+    `MTU = ${mtu}`,
     '',
     '[Peer]',
     `PublicKey = ${serverPublicKey}`,

@@ -80,6 +80,30 @@ label {
   color: var(--muted);
 }
 
+.opts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+label.check input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 input {
   width: 100%;
   border: 1px solid var(--line);

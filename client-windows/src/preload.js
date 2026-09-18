@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('rbvpn', {
   saveSettings: (data) => ipcRenderer.invoke('save-settings', data),
   logout: () => ipcRenderer.invoke('logout'),
   login: (payload) => ipcRenderer.invoke('login', payload),
+  tryAutoLogin: () => ipcRenderer.invoke('try-auto-login'),
   fetchSubscription: () => ipcRenderer.invoke('fetch-subscription'),
   listNodes: () => ipcRenderer.invoke('list-nodes'),
   ensureDevice: (opts) => ipcRenderer.invoke('ensure-device', opts || {}),

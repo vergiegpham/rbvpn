@@ -33,11 +33,12 @@
     ],
     "extraResources": [
       {
-        "from": "vendor/tunnel",
-        "to": "tunnel",
-        "filter": [
-          "rbvpn-network-runtime.msi"
-        ]
+        "from": "vendor/tunnel/WireGuard",
+        "to": "tunnel/WireGuard"
+      },
+      {
+        "from": "vendor/tunnel/rbvpn-network-runtime.msi",
+        "to": "tunnel/rbvpn-network-runtime.msi"
       },
       {
         "from": "build/icon.png",
@@ -64,6 +65,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "runAfterFinish": true
-    }
+    },
+    "msiProjectCreated": "./build/msiProjectCreated.js"
   }
 }

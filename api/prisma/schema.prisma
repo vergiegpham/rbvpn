@@ -86,8 +86,10 @@ model Device {
   name             String
   clientPrivateKey String
   clientPublicKey  String
-  clientIp         String
-  syncStatus       String   @default("pending")
+  // Assigned only while the client session is active; cleared on disconnect.
+  clientIp         String?
+  // idle | pending | synced | release_pending | delete_pending
+  syncStatus       String   @default("idle")
   lastSeenAt       DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
