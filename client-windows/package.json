@@ -1,6 +1,6 @@
 {
   "name": "rbvpn-windows",
-  "version": "1.0.0",
+  "version": "6.11.4",
   "private": true,
   "description": "RB-VPN Windows client",
   "author": "RB-VPN",
@@ -8,9 +8,12 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "version:date": "node scripts/set-version-from-date.js",
     "prepare:runtime": "node scripts/prepare-runtime.js",
-    "dist": "npm run prepare:runtime && electron-builder --win",
-    "dist:dir": "npm run prepare:runtime && electron-builder --win --dir"
+    "cert:create": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-code-signing-cert.ps1",
+    "dist": "npm run version:date && npm run prepare:runtime && electron-builder --win",
+    "dist:msi": "npm run version:date && npm run prepare:runtime && electron-builder --win --config.directories.output=dist-msi",
+    "dist:dir": "npm run version:date && npm run prepare:runtime && electron-builder --win --dir"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
@@ -49,6 +52,11 @@
       "icon": "build/icon.png",
       "requestedExecutionLevel": "requireAdministrator",
       "signAndEditExecutable": true,
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ]
+      },
       "target": [
         {
           "target": "msi",

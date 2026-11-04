@@ -1,23 +1,31 @@
-import { Router } from 'express';
 import { z } from 'zod';
-import { nodeAgentRequired, authRequired, adminRequired } from '../middleware/auth.js';
+import { nodeAgentRequired } from '../middleware/auth.js';
 import { prisma } from '../utils/db.js';
+import { createRouter } from '../utils/router.js';
 
-const router = Router();
+const router = createRouter();
 
-/** Node agent pulls peers that need to be added/removed on WireGuard */
+// A peer with a handshake this recent counts as an active session.
+const ACTIVE_HANDSHAKE_SECONDS = 5 * 60;
+
+/**
+ * Node agent pulls peers to add/remove on WireGuard.
+ * `full=1` also returns already-synced peers so the agent can restore them after a reboot
+ * and prune peers the API no longer knows about.
+ */
 router.get('/peers', nodeAgentRequired, async (req, res) => {
-  const nodeId = req.query.nodeId;
+  const nodeId = String(req.query.nodeId || '');
   if (!nodeId) return res.status(400).json({ error: 'nodeId required' });
+  const full = req.query.full === '1';
 
   const node = await prisma.vpnNode.findUnique({ where: { id: nodeId } });
   if (!node) return res.status(404).json({ error: 'Node not found' });
 
-  const pending = await prisma.device.findMany({
-    where: {
-      nodeId,
-      syncStatus: { in: ['pending', 'delete_pending', 'release_pending'] },
-    },
+  const statuses = ['pending', 'delete_pending', 'release_pending'];
+  if (full) statuses.push('synced');
+
+  const peers = await prisma.device.findMany({
+    where: { nodeId, syncStatus: { in: statuses } },
     select: {
       id: true,
       clientPublicKey: true,
@@ -33,7 +41,9 @@ router.get('/peers', nodeAgentRequired, async (req, res) => {
       gatewayIp: node.gatewayIp,
       publicPort: node.publicPort,
     },
-    peers: pending,
+    // Agents only prune unknown peers when the API confirms this is the complete peer list.
+    full,
+    peers,
   });
 });
 
@@ -46,8 +56,9 @@ router.post('/peers/ack', nodeAgentRequired, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
 
   if (parsed.data.applied.length) {
+    // Only promote rows still waiting; a disconnect may have raced the agent.
     await prisma.device.updateMany({
-      where: { id: { in: parsed.data.applied } },
+      where: { id: { in: parsed.data.applied }, syncStatus: 'pending' },
       data: { syncStatus: 'synced', lastSeenAt: new Date() },
     });
   }
@@ -57,46 +68,60 @@ router.post('/peers/ack', nodeAgentRequired, async (req, res) => {
       select: { id: true, syncStatus: true },
     });
     const toRelease = rows.filter((r) => r.syncStatus === 'release_pending').map((r) => r.id);
-    const toDelete = rows.filter((r) => r.syncStatus !== 'release_pending').map((r) => r.id);
+    const toDelete = rows.filter((r) => r.syncStatus === 'delete_pending').map((r) => r.id);
 
     // Disconnect: free IP, keep device identity for next connect.
     if (toRelease.length) {
       await prisma.device.updateMany({
-        where: { id: { in: toRelease } },
+        where: { id: { in: toRelease }, syncStatus: 'release_pending' },
         data: { syncStatus: 'idle', clientIp: null },
       });
     }
     // Hard delete / node switch ghost peers.
     if (toDelete.length) {
       await prisma.device.deleteMany({
-        where: { id: { in: toDelete } },
+        where: { id: { in: toDelete }, syncStatus: 'delete_pending' },
       });
     }
   }
   res.json({ ok: true });
 });
 
-router.post('/register-node', authRequired, adminRequired, async (req, res) => {
+/** Heartbeat: marks the agent alive and refreshes lastSeenAt for peers with recent handshakes. */
+router.post('/report', nodeAgentRequired, async (req, res) => {
   const schema = z.object({
-    name: z.string(),
-    region: z.string(),
-    publicHost: z.string(),
-    publicPort: z.number().int().default(51820),
-    publicKey: z.string(),
-    interfaceName: z.string().default('wg0'),
-    subnetCidr: z.string().default('10.10.0.0/24'),
-    gatewayIp: z.string().default('10.10.0.1'),
+    nodeId: z.string().min(1),
+    handshakes: z.record(z.string(), z.number()).default({}),
   });
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
 
-  const node = await prisma.vpnNode.create({ data: parsed.data });
-  res.status(201).json({ node });
-});
+  const { nodeId, handshakes } = parsed.data;
+  const now = new Date();
+  const updated = await prisma.vpnNode.updateMany({
+    where: { id: nodeId },
+    data: { agentSeenAt: now },
+  });
+  if (!updated.count) return res.status(404).json({ error: 'Node not found' });
 
-router.get('/nodes', authRequired, adminRequired, async (_req, res) => {
-  const nodes = await prisma.vpnNode.findMany({ orderBy: { createdAt: 'asc' } });
-  res.json({ nodes });
+  const nowSeconds = Math.floor(now.getTime() / 1000);
+  const activeKeys = Object.entries(handshakes)
+    .filter(([, at]) => at > 0 && nowSeconds - at < ACTIVE_HANDSHAKE_SECONDS)
+    .map(([key]) => key);
+
+  if (activeKeys.length) {
+    await prisma.device.updateMany({
+      where: {
+        nodeId,
+        clientPublicKey: { in: activeKeys },
+        syncStatus: 'synced',
+        // Skip rows refreshed within the last minute to keep writes low.
+        OR: [{ lastSeenAt: null }, { lastSeenAt: { lt: new Date(now.getTime() - 60 * 1000) } }],
+      },
+      data: { lastSeenAt: now },
+    });
+  }
+  res.json({ ok: true, active: activeKeys.length });
 });
 
 export default router;

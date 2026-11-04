@@ -9,7 +9,10 @@
   <body>
     <div class="shell">
       <header>
-        <div class="brand">RB-VPN</div>
+        <div class="brand-block">
+          <div class="brand">RB-VPN</div>
+          <div id="app-version" class="version">v…</div>
+        </div>
         <div id="status-pill" class="pill off">Disconnected</div>
       </header>
 
@@ -42,8 +45,7 @@
           <label>Server node</label>
           <select id="nodeSelect"></select>
           <div class="row" id="connect-row">
-            <button id="btn-connect" class="primary">Connect</button>
-            <button id="btn-disconnect" class="ghost hidden">Disconnect</button>
+            <button id="btn-tunnel" class="primary" type="button">Connect</button>
           </div>
           <p id="app-msg" class="muted"></p>
           <details class="advanced">
@@ -54,7 +56,7 @@
               <label class="check"><input id="opt-openAtLogin" type="checkbox" /> Start with Windows</label>
             </div>
           </details>
-          <button id="btn-open-log" class="link" type="button">Open connect log</button>
+          <button id="btn-open-log" class="link" type="button">Open activity log</button>
         </div>
         <button id="btn-logout" class="link">Log out</button>
       </section>

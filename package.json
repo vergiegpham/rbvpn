@@ -1,6 +1,6 @@
 {
   "name": "rbvpn",
-  "version": "1.0.0",
+  "version": "6.10.7",
   "private": true,
   "description": "RB-VPN platform — website, API, Linux WireGuard nodes, Windows client",
   "scripts": {

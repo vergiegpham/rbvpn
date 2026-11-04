@@ -171,6 +171,8 @@ export async function switchDeviceNode(userId, deviceId, nodeId) {
   const { privateKey, publicKey } = generateWireGuardKeyPair();
 
   return prisma.$transaction(async (tx) => {
+    await tx.device.delete({ where: { id: device.id } });
+
     // Queue removal of old peer on previous node if it held an IP.
     if (device.clientIp) {
       await tx.device.create({
@@ -185,8 +187,6 @@ export async function switchDeviceNode(userId, deviceId, nodeId) {
         },
       });
     }
-
-    await tx.device.delete({ where: { id: device.id } });
 
     return tx.device.create({
       data: {
@@ -251,11 +251,24 @@ export async function startDeviceSession(userId, deviceId) {
   }
 
   const updated = await prisma.$transaction(async (tx) => {
+    // Row lock serializes allocations per node; without it two connects can pick the same IP.
+    await tx.$queryRaw`SELECT id FROM "VpnNode" WHERE id = ${device.nodeId} FOR UPDATE`;
     const locked = await tx.vpnNode.findUnique({ where: { id: device.nodeId } });
     if (!locked) {
       const err = new Error('VPN node not found');
       err.status = 404;
       throw err;
+    }
+    // A concurrent connect for this same device may have assigned an IP while we waited.
+    const current = await tx.device.findUnique({ where: { id: device.id }, include: { node: true } });
+    if (current?.clientIp && ACTIVE_PEER_STATUSES.includes(current.syncStatus)) {
+      return current.syncStatus === 'release_pending'
+        ? tx.device.update({
+            where: { id: device.id },
+            data: { syncStatus: 'pending' },
+            include: { node: true },
+          })
+        : current;
     }
     const activePeers = await countActivePeersOnNode(tx, locked.id);
     if (activePeers >= locked.capacity) {

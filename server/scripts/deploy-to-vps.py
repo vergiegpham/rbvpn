@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import io
 import re
+import shutil
 import sys
 import tarfile
 import time
@@ -101,6 +102,22 @@ def build_tarball(targets: list[str]) -> bytes:
     return buf.getvalue()
 
 
+def refresh_download_from_latest_build(local_setup: Path) -> None:
+    """Ship the newest client-windows/dist-msi build if it is newer than the downloads copy."""
+    builds = sorted(
+        (ROOT / "client-windows" / "dist-msi").glob("RB-VPN-Setup-*.msi"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    if not builds:
+        return
+    newest = builds[-1]
+    if local_setup.exists() and local_setup.stat().st_mtime >= newest.stat().st_mtime:
+        return
+    local_setup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(newest, local_setup)
+    print(f"Using latest client build {newest.name} for the download")
+
+
 def ssh_connect(info: dict[str, str]):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -128,6 +145,75 @@ def run(client, cmd: str, timeout: int = 1200) -> str:
     if code != 0:
         raise SystemExit(f"Remote command failed ({code}): {cmd}")
     return out
+
+
+# Runs on the VPS. Mirrors api/src/utils/env.js isWeakSecret(): replaces missing, short, or
+# published-default secrets, keeping the agent's NODE_AGENT_SECRET in step with the API.
+ENSURE_SECRETS_PY = r'''
+import secrets
+from pathlib import Path
+
+WEAK = {
+    "dev-secret", "change-me-to-a-long-random-string", "rbvpn-dev-jwt-secret-change-in-production",
+    "rbvpn-prod-jwt-change-me", "change-me-node-agent-secret", "rbvpn-dev-node-agent-secret",
+}
+API_ENV = Path("/opt/rbvpn/api/.env")
+AGENT_ENV = Path("/opt/rbvpn/server/vpn-agent/.env")
+
+def read(path):
+    values = {}
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            if "=" in raw and not raw.lstrip().startswith("#"):
+                key, value = raw.split("=", 1)
+                values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+def write(path, key, value):
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    out, done = [], False
+    for raw in lines:
+        if raw.split("=", 1)[0].strip() == key and not raw.lstrip().startswith("#"):
+            out.append(f"{key}={value}")
+            done = True
+        else:
+            out.append(raw)
+    if not done:
+        out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+def weak(value):
+    return not value or len(value) < 32 or value in WEAK
+
+api = read(API_ENV)
+changed = []
+if weak(api.get("JWT_SECRET", "")):
+    write(API_ENV, "JWT_SECRET", secrets.token_urlsafe(48))
+    changed.append("JWT_SECRET")
+
+agent_secret = api.get("NODE_AGENT_SECRET", "")
+if weak(agent_secret):
+    agent_secret = secrets.token_urlsafe(48)
+    write(API_ENV, "NODE_AGENT_SECRET", agent_secret)
+    changed.append("NODE_AGENT_SECRET")
+if AGENT_ENV.exists() and read(AGENT_ENV).get("NODE_AGENT_SECRET") != agent_secret:
+    write(AGENT_ENV, "NODE_AGENT_SECRET", agent_secret)
+    if "NODE_AGENT_SECRET" not in changed:
+        changed.append("NODE_AGENT_SECRET (agent copy)")
+
+print("SECRETS_ROTATED=" + ",".join(changed) if changed else "SECRETS_OK")
+'''
+
+
+def ensure_secrets(client) -> list[str]:
+    out = run(client, f"python3 - <<'PY'\n{ENSURE_SECRETS_PY}\nPY")
+    for line in out.splitlines():
+        if line.startswith("SECRETS_ROTATED="):
+            rotated = [s for s in line.split("=", 1)[1].split(",") if s]
+            if "JWT_SECRET" in rotated:
+                print("JWT_SECRET was weak and has been replaced: every user must sign in again.")
+            return rotated
+    return []
 
 
 def main() -> None:
@@ -207,6 +293,10 @@ def main() -> None:
     if "agent" in targets and not args.skip_install:
         run(client, f"cd {REMOTE_ROOT}/server/vpn-agent && npm install --omit=dev")
 
+    rotated: list[str] = []
+    if "api" in targets or "agent" in targets:
+        rotated = ensure_secrets(client)
+
     if "website" in targets:
         # keep production API URL if file missing
         run(
@@ -225,9 +315,9 @@ def main() -> None:
             run(client, f"cd {REMOTE_ROOT}/website && npm run build")
 
     services = []
-    if "api" in targets:
+    if "api" in targets or rotated:
         services.append("rbvpn-api")
-    if "agent" in targets:
+    if "agent" in targets or any(s.startswith("NODE_AGENT_SECRET") for s in rotated):
         services.append("rbvpn-agent")
     if "website" in targets:
         services.extend(["rbvpn-web", "nginx"])
@@ -240,6 +330,8 @@ def main() -> None:
 
     # Upload Windows installer only when content changed (skip identical SHA256)
     local_setup = ROOT / "website" / "public" / "downloads" / "RB-VPN-Setup.msi"
+    if "website" in targets:
+        refresh_download_from_latest_build(local_setup)
     if "website" in targets and local_setup.exists():
         remote_setup = "/var/www/rbvpn-downloads/RB-VPN-Setup.msi"
         local_sha = hashlib.sha256(local_setup.read_bytes()).hexdigest()

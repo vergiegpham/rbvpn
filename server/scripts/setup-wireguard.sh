@@ -41,6 +41,23 @@ PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null || true; ipt
 EOF
 
 chmod 600 /etc/wireguard/${WG_IFACE}.conf
+
+# Persist IP forwarding across reboot (UFW can leave it off otherwise).
+mkdir -p /etc/sysctl.d
+cat >/etc/sysctl.d/99-rbvpn-forward.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.forwarding=1
+EOF
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv4.conf.all.forwarding=1
+if grep -q '^net/ipv4/ip_forward=' /etc/ufw/sysctl.conf 2>/dev/null; then
+  sed -i 's|^net/ipv4/ip_forward=.*|net/ipv4/ip_forward=1|' /etc/ufw/sysctl.conf
+elif grep -q '^#net/ipv4/ip_forward=' /etc/ufw/sysctl.conf 2>/dev/null; then
+  sed -i 's|^#net/ipv4/ip_forward=.*|net/ipv4/ip_forward=1|' /etc/ufw/sysctl.conf
+else
+  echo 'net/ipv4/ip_forward=1' >> /etc/ufw/sysctl.conf
+fi
+
 systemctl enable --now wg-quick@${WG_IFACE}
 
 sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw || true

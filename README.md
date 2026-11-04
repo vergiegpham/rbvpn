@@ -34,6 +34,14 @@ npm run db:setup
 npm run dev
 ```
 
+End-to-end API tests (they start the API themselves on ports 4100/4101 and refuse any database whose name does not end in `_test`):
+
+```bash
+cd api
+DATABASE_URL="postgresql://rbvpn:PASSWORD@127.0.0.1:5432/rbvpn_test?schema=public" npx prisma db push
+DATABASE_URL="postgresql://rbvpn:PASSWORD@127.0.0.1:5432/rbvpn_test?schema=public" npm run test:integration
+```
+
 On Ubuntu/Debian you can provision Postgres with:
 
 ```bash
@@ -41,7 +49,7 @@ sudo bash server/scripts/setup-postgres.sh
 ```
 
 API: `http://localhost:4000`  
-Admin seed: `admin@rbvpn.local` / `admin123!`
+Admin seed: `admin@rbvpn.local` (or `ADMIN_EMAIL`). The password is `ADMIN_PASSWORD` from `.env`; if unset, the seed prints a random one once. The seed only creates missing rows, so plans and nodes edited in the admin panel are never overwritten.
 
 ### 2) Website
 
@@ -55,16 +63,18 @@ Site: `http://localhost:3000`
 
 ### 3) Windows client
 
-1. Install [WireGuard for Windows](https://www.wireguard.com/install/)
-2. Run:
+The installer bundles the WireGuard runtime (`npm run prepare:runtime` downloads it for development). Run as administrator:
 
 ```bash
 cd client-windows
 npm install
+npm run prepare:runtime
 npm start
 ```
 
-Sign in with a user that has an **active subscription**. Without Stripe/NOWPayments keys, the site checkout returns a **mock payment** URL that activates the plan for testing.
+Build the MSI with `npm run dist:msi` (output in `client-windows/dist-msi`; the version comes from the build date).
+
+Sign in with a user that has an **active subscription**. For local testing without Stripe/NOWPayments keys, set `ALLOW_MOCK_PAYMENTS=true` in `api/.env`: checkout then activates the plan without charging. Admins can also grant plans from **Admin → Users**.
 
 ### 4) Linux VPS node
 
@@ -96,27 +106,33 @@ In `api/.env`:
 
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
-- optional `STRIPE_PRICE_BASIC` / `STRIPE_PRICE_PRO`
+- optional `STRIPE_PRICE_BASIC` / `STRIPE_PRICE_PRO` / `STRIPE_PRICE_BASIC_ANNUAL` / `STRIPE_PRICE_PRO_ANNUAL` (otherwise the plan price is sent to Stripe directly)
 
-Webhook endpoint: `POST /api/payments/stripe/webhook`
+Webhook endpoint: `POST /api/payments/stripe/webhook` — subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, and `checkout.session.expired`.
 
 ### Crypto (NOWPayments)
 
 - `NOWPAYMENTS_API_KEY`
-- `NOWPAYMENTS_IPN_SECRET`
+- `NOWPAYMENTS_IPN_SECRET` (required — every IPN is checked against its `x-nowpayments-sig` signature)
 - `NOWPAYMENTS_SANDBOX=true` for test
 
 IPN endpoint: `POST /api/payments/crypto/ipn`
 
-If keys are empty, checkout uses **mock pay** so you can develop without live billing.
+A provider is offered on the pricing page only when both of its keys are set. With no provider configured the pricing page asks customers to contact you, and plans can be granted from the admin panel. `ALLOW_MOCK_PAYMENTS=true` turns unconfigured providers into a no-charge test checkout — local development only.
 
 ## User flow
 
 1. Register on the website  
 2. Buy Basic/Pro (Stripe or crypto)  
-3. Dashboard → add device (or client auto-creates one)  
-4. Node agent applies WireGuard peer  
-5. Windows app Connect → traffic exits via VPS IP  
+3. Windows app creates its device on first Connect  
+4. Connect: the API assigns a VPN IP and the node agent adds the WireGuard peer  
+5. Traffic exits via the VPS IP; Disconnect (or quitting the app) frees the IP  
+
+While connected, the app checks the tunnel every 30 seconds. If the server drops the session (VPS reboot, plan ended, admin disconnect) it reconnects or disconnects cleanly, so the PC is not left without internet.
+
+The API frees sessions when a plan expires or is cancelled, when a user is suspended, and after `STALE_SESSION_HOURS` without a WireGuard handshake.
+
+The node agent reconciles the whole interface every poll: after a VPS reboot it restores connected peers, and it removes peers the API no longer knows (`PRUNE_UNKNOWN_PEERS`, `KEEP_PEERS` in `server/vpn-agent/.env`). Run its tests with `npm test` in `server/vpn-agent`.
 
 ## Repo layout
 
@@ -159,16 +175,19 @@ python server/scripts/deploy-to-vps.py --skip-build
 ```
 
 This uploads to `/opt/rbvpn`, runs install/build as needed, and restarts `rbvpn-api`, `rbvpn-agent`, `rbvpn-web`, `nginx`.  
-VPS `.env` files and databases are **not** overwritten.
+VPS `.env` files and databases are **not** overwritten, with one exception: a missing, short, or default `JWT_SECRET` / `NODE_AGENT_SECRET` is replaced with a random value (replacing `JWT_SECRET` signs everyone out).  
+The newest `client-windows/dist-msi/RB-VPN-Setup-*.msi` is copied to the download page when it is newer than the current one.
 
 ## Production notes
 
-- Change `JWT_SECRET` and `NODE_AGENT_SECRET`
+- `JWT_SECRET` and `NODE_AGENT_SECRET` must be long random values (the API logs a warning otherwise; deploy fixes it)
+- Keep `ALLOW_MOCK_PAYMENTS` unset or `false`
+- Change the seeded admin password from the dashboard after the first login
 - PostgreSQL is provisioned by `server/scripts/setup-postgres.sh` (also run automatically on API deploy)
 - Put API behind HTTPS; point website `NEXT_PUBLIC_API_URL` at it
 - Register real node public keys (never leave `REPLACE_WITH_SERVER_PUBLIC_KEY`)
 - For restrictive networks, plain WireGuard UDP may be blocked — plan obfuscation/transport upgrades separately
-- Add ToS, privacy policy, and abuse handling before taking payments
+- Review `/terms` and `/privacy` (`website/app/terms`, `website/app/privacy`) for your business and jurisdiction before taking payments
 
 ## Brand
 

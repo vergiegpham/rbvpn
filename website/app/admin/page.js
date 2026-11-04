@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import AdminShell from '@/components/AdminShell';
-import { api, getStoredUser, getToken } from '@/lib/api';
+import { api, formatMoney, getStoredUser, getToken } from '@/lib/api';
 
 function StatCard({ label, value }) {
   return (
@@ -57,16 +57,11 @@ export default function AdminOverviewPage() {
           <StatCard label="Users" value={stats.users} />
           <StatCard label="Active subscriptions" value={stats.activeSubscriptions} />
           <StatCard label="Devices" value={stats.devices} />
+          <StatCard label="Connected now" value={stats.liveSessions ?? 0} />
           <StatCard label="Active nodes" value={stats.activeNodes} />
           <StatCard label="Paid orders" value={stats.paidPayments} />
-          <StatCard
-            label="Revenue today"
-            value={`$${((stats.dailyRevenueCents || 0) / 100).toFixed(2)}`}
-          />
-          <StatCard
-            label="Revenue this month"
-            value={`$${((stats.monthlyRevenueCents || 0) / 100).toFixed(2)}`}
-          />
+          <StatCard label="Revenue today" value={formatMoney(stats.dailyRevenueCents)} />
+          <StatCard label="Revenue this month" value={formatMoney(stats.monthlyRevenueCents)} />
         </div>
       )}
 
@@ -76,6 +71,12 @@ export default function AdminOverviewPage() {
         </a>
         <a href="/admin/users" className="ghost-btn">
           Manage users
+        </a>
+        <a href="/admin/devices" className="ghost-btn">
+          Connected devices
+        </a>
+        <a href="/admin/payments" className="ghost-btn">
+          Payments
         </a>
         <a href="/admin/messages" className="ghost-btn">
           Messages

@@ -1,0 +1,3 @@
+$env:CSC_LINK = (Resolve-Path .\certs\rbvpn-codesign.pfx).Path
+$env:CSC_KEY_PASSWORD = (Get-Content .\certs\pfx-password.txt -Raw).Trim()
+npm run dist:msi

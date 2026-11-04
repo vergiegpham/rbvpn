@@ -1,20 +1,59 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Tray,
+  Menu,
+  nativeImage,
+  safeStorage,
+  powerMonitor,
+  Notification,
+} = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
 const Store = require('electron-store');
 const { ensureRuntimeInstaller } = require('./runtime');
-const { log, logPath, clearLog, readLogTail } = require('./log');
+const { log, logPath, clearLog } = require('./log');
 
 const store = new Store({ name: 'rbvpn' });
 const TUNNEL_NAME = 'RB-VPN';
 const CONF_NAME = `${TUNNEL_NAME}.conf`;
 const DEFAULT_API = process.env.RBVPN_API_URL || 'http://162.35.175.39:4000';
 
+const API_TIMEOUT_MS = 15000;
+
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let quittingAfterTunnelStop = false;
+
+// disconnected | connecting | connected | reconnecting | disconnecting
+let tunnelState = 'disconnected';
+const TUNNEL_STATE_LABELS = {
+  disconnected: 'Disconnected',
+  connecting: 'Connecting…',
+  connected: 'Connected',
+  reconnecting: 'Reconnecting…',
+  disconnecting: 'Disconnecting…',
+};
+
+function setTunnelState(state, message = '') {
+  tunnelState = state;
+  log('info', 'tunnel-state', { state, message });
+  if (tray) tray.setToolTip(`RB-VPN — ${TUNNEL_STATE_LABELS[state] || state}`);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('tunnel-state', { state, message });
+  }
+}
+
+// Connect, disconnect, and watchdog recovery all touch the same Windows service: run them one at a time.
+let tunnelQueue = Promise.resolve();
+function runTunnelOp(fn) {
+  const run = tunnelQueue.then(() => fn());
+  tunnelQueue = run.catch(() => {});
+  return run;
+}
 
 function confPath() {
   return path.join(app.getPath('userData'), CONF_NAME);
@@ -69,10 +108,6 @@ function bundledTunnelHelper() {
 
 function legacyWireGuardDir() {
   return path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'WireGuard');
-}
-
-function legacyTunnelHelper() {
-  return path.join(legacyWireGuardDir(), 'wireguard.exe');
 }
 
 function findTunnelHelper() {
@@ -297,11 +332,25 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+// Windows only shows notifications for an app with an AppUserModelID (matches build.appId).
+if (process.platform === 'win32') app.setAppUserModelId('com.rbvpn.client');
+
+app.whenReady().then(async () => {
   log('info', 'app-ready', { logFile: logPath(), userData: app.getPath('userData') });
+  // Always tear down leftover tunnel on launch (covers crash / force-kill / reboot).
+  try {
+    await runTunnelOp(() => stopTunnel({ reason: 'app-start' }));
+  } catch (err) {
+    log('error', 'app-start:stop-tunnel', err.message || String(err));
+  }
   applyOpenAtLogin(!!store.get('openAtLogin', false));
   createTray();
   createWindow();
+
+  // After sleep the tunnel may have lost its server session; check soon instead of waiting a full cycle.
+  powerMonitor.on('resume', () => {
+    if (watchdog) setTimeout(scheduleWatchdogTick, 15000);
+  });
 });
 
 // Keep process alive in the tray when the window is hidden.
@@ -323,7 +372,9 @@ app.on('before-quit', (e) => {
   if (!store.get('autoLogin', false)) {
     store.delete('token');
   }
-  stopTunnel({ reason: 'app-quit' })
+  stopWatchdog();
+  cancelPendingConnects();
+  runTunnelOp(() => stopTunnel({ reason: 'app-quit' }))
     .catch((err) => log('error', 'quit:stop-tunnel', err.message || String(err)))
     .finally(() => {
       if (tray) {
@@ -337,6 +388,8 @@ app.on('before-quit', (e) => {
       app.quit();
     });
 });
+
+ipcMain.handle('get-version', () => ({ version: app.getVersion() }));
 
 ipcMain.handle('get-settings', () => {
   const prefs = prefsFromStore();
@@ -383,7 +436,17 @@ ipcMain.handle('save-settings', (_e, data) => {
   return prefsFromStore();
 });
 
-ipcMain.handle('logout', () => {
+ipcMain.handle('logout', async () => {
+  // Disconnect first: releasing the server session needs the token we are about to drop.
+  cancelPendingConnects();
+  await runTunnelOp(async () => {
+    stopWatchdog();
+    if (tunnelState !== 'disconnected') {
+      setTunnelState('disconnecting');
+      await stopTunnel({ reason: 'logout' });
+      setTunnelState('disconnected');
+    }
+  });
   store.delete('token');
   store.delete('deviceId');
   // Keep email/password when "save password" is on.
@@ -394,18 +457,34 @@ ipcMain.handle('logout', () => {
   return true;
 });
 
-async function api(pathname, { method = 'GET', body, token, apiUrl } = {}) {
+async function api(pathname, { method = 'GET', body, token, apiUrl, timeoutMs = API_TIMEOUT_MS } = {}) {
   const base = apiUrl || store.get('apiUrl', DEFAULT_API);
   const headers = { 'Content-Type': 'application/json' };
   const auth = token || store.get('token');
   if (auth) headers.Authorization = `Bearer ${auth}`;
-  const res = await fetch(`${base}${pathname}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(`${base}${pathname}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const e = new Error(
+      err.name === 'TimeoutError'
+        ? 'The RB-VPN server did not respond. Check your internet connection and try again.'
+        : 'Cannot reach the RB-VPN server. Check your internet connection and try again.'
+    );
+    e.network = true;
+    throw e;
+  }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const e = new Error(data.error || `HTTP ${res.status}`);
+    e.status = res.status;
+    throw e;
+  }
   return data;
 }
 
@@ -561,19 +640,15 @@ ipcMain.handle('ensure-device', async (_e, { nodeId } = {}) => {
     fs.writeFileSync(confPath(), config.conf, 'utf8');
   }
   log('info', 'ensure-device:ready', {
-    conf: confPath(),
+    deviceId,
     syncStatus: device.syncStatus,
     address: device.clientIp || null,
-    hasConf: Boolean(config?.conf),
   });
   return {
     deviceId,
     name: device.name,
     region: device.node?.region,
     nodeName: device.node?.name,
-    endpoint: device.node
-      ? `${device.node.publicHost}:${device.node.publicPort || 51820}`
-      : null,
     address: device.clientIp || null,
     syncStatus: device.syncStatus,
   };
@@ -635,17 +710,11 @@ async function elevatedBatch(lines, label = 'rbvpn-task') {
   }
 }
 
-/** Elevate a single program with args (one UAC). */
-function elevatedExec(file, args) {
-  const parts = [quoteCmd(file), ...args.map(quoteCmd)];
-  return elevatedBatch([parts.join(' ')], 'rbvpn-exec');
-}
-
 /**
  * Write orphan-cleanup script to temp, return elevated batch lines to install it + schtask.
  * (MSI uninstall cannot run NSIS customUnInstall hooks.)
  */
-function orphanTunnelCleanupBatchLines(helper) {
+function orphanTunnelCleanupBatchLines() {
   const cleanupDir = path.join(process.env.ProgramData || 'C:\\ProgramData', 'RB-VPN');
   const cleanupCmd = path.join(cleanupDir, 'orphan-tunnel-cleanup.cmd');
   const staging = path.join(app.getPath('temp'), 'rbvpn-orphan-tunnel-cleanup.cmd');
@@ -694,7 +763,7 @@ function elevatedApplyTunnel(helper, confFile) {
       'if errorlevel 1 exit /b 1',
       `sc start ${quoteCmd(tunnelSvc)} >nul 2>&1`,
       `sc config ${quoteCmd(tunnelSvc)} start= demand >nul 2>&1`,
-      ...orphanTunnelCleanupBatchLines(helper),
+      ...orphanTunnelCleanupBatchLines(),
     ],
     'rbvpn-apply-tunnel'
   );
@@ -702,7 +771,7 @@ function elevatedApplyTunnel(helper, confFile) {
 
 /** Stop/remove the RB-VPN tunnel service (no-op if not installed). */
 async function stopTunnel({ reason = 'disconnect' } = {}) {
-  progress('disconnect', reason === 'app-quit' ? 'Stopping tunnel before quit…' : 'Disconnecting…');
+  progress('disconnect', 'Disconnecting…');
   const installed = await isTunnelServiceInstalled();
   if (!installed) {
     // Tunnel already down — safe to tell the API to free the IP.
@@ -731,8 +800,7 @@ async function stopTunnel({ reason = 'disconnect' } = {}) {
       return {
         ok: false,
         error:
-          'Could not stop the tunnel automatically. Approve the administrator prompt, or restart the PC.',
-        detail: result.stderr || (result.err && result.err.message),
+          'Could not disconnect automatically. Restart RB-VPN as administrator, or restart the PC.',
         logFile: logPath(),
       };
     }
@@ -749,39 +817,6 @@ function sleep(ms) {
 
 function wgCliPath(helper) {
   return path.join(path.dirname(helper), 'wg.exe');
-}
-
-function parseClientConf(confText) {
-  const address = (confText.match(/^\s*Address\s*=\s*([0-9.]+)/m) || [])[1] || '';
-  const peerPublicKey = (confText.match(/\[Peer\][\s\S]*?^\s*PublicKey\s*=\s*(.+)$/m) || [])[1] || '';
-  return {
-    address: String(address).trim(),
-    peerPublicKey: String(peerPublicKey).trim(),
-  };
-}
-
-/** VPN LAN only — does not blackhole general internet while waiting for handshake. */
-function vpnSubnetAllowedIps(address) {
-  const parts = String(address || '').split('.');
-  if (parts.length !== 4) return '10.10.0.0/24';
-  return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
-}
-
-/**
- * Bootstrap conf: handshake-safe (no 0.0.0.0/0, no tunnel DNS).
- * Full-tunnel conf is applied only after handshake succeeds.
- */
-function buildBootstrapConf(fullConf) {
-  const { address } = parseClientConf(fullConf);
-  const allowed = vpnSubnetAllowedIps(address);
-  return String(fullConf)
-    .replace(/^\s*DNS\s*=\s*.+$/im, '# DNS applied after full tunnel is verified')
-    .replace(/^\s*AllowedIPs\s*=\s*.+$/im, `AllowedIPs = ${allowed}`);
-}
-
-function bootstrapConfPath() {
-  // Must keep basename RB-VPN.conf so the service is WireGuardTunnel$RB-VPN (not .bootstrap).
-  return path.join(app.getPath('userData'), `${TUNNEL_NAME}.bootstrap.src.conf`);
 }
 
 function fullTunnelConfPath() {
@@ -843,41 +878,48 @@ function parseEndpointHost(confText) {
   return m ? m[1].trim() : '';
 }
 
-/** True when WireGuard has completed at least one handshake with the peer. */
-async function tunnelHasHandshake(helper) {
+/** Seconds since the newest WireGuard handshake on the tunnel; Infinity if none yet or unreadable. */
+async function latestHandshakeAgeSeconds(helper) {
   const wgCli = wgCliPath(helper);
-  if (!fs.existsSync(wgCli)) return false;
-  // Prefer listing all interfaces — name mismatches are less brittle.
+  if (!fs.existsSync(wgCli)) return Infinity;
+  // Fall back to listing all interfaces — name mismatches are less brittle.
   let r = await execFileAsync(wgCli, ['show', TUNNEL_NAME, 'latest-handshakes']);
   if ((r.err && !r.stdout) || !String(r.stdout || '').trim()) {
     r = await execFileAsync(wgCli, ['show', 'all', 'latest-handshakes']);
   }
   if (r.err && !r.stdout) {
     log('info', 'handshake:wg-show-failed', r.stderr || (r.err && r.err.message));
-    return false;
+    return Infinity;
   }
+  let latest = 0;
   for (const line of String(r.stdout || '')
     .trim()
     .split(/\r?\n/)) {
     if (!line.trim()) continue;
     const parts = line.trim().split(/\s+/);
     const ts = Number(parts[parts.length - 1]);
-    if (Number.isFinite(ts) && ts > 0) return true;
+    if (Number.isFinite(ts) && ts > latest) latest = ts;
   }
-  return false;
+  return latest > 0 ? Math.max(0, Date.now() / 1000 - latest) : Infinity;
 }
 
-async function waitForTunnelHandshake(helper, { timeoutMs = 20000 } = {}) {
+/** True when WireGuard has completed at least one handshake with the peer. */
+async function tunnelHasHandshake(helper) {
+  return Number.isFinite(await latestHandshakeAgeSeconds(helper));
+}
+
+async function waitForTunnelHandshake(helper, { timeoutMs = 20000, isCancelled = () => false } = {}) {
   const started = Date.now();
-  progress('tunnel', 'Waiting for VPN handshake…');
+  progress('tunnel', 'Securing connection…');
   while (Date.now() - started < timeoutMs) {
+    if (isCancelled()) return false;
     if (await tunnelHasHandshake(helper)) {
       log('info', 'handshake:ok', { elapsedMs: Date.now() - started });
       return true;
     }
     progress(
       'tunnel',
-      `Waiting for VPN handshake… (${Math.round((Date.now() - started) / 1000)}s)`
+      `Securing connection… (${Math.round((Date.now() - started) / 1000)}s)`
     );
     await sleep(1000);
   }
@@ -887,9 +929,8 @@ async function waitForTunnelHandshake(helper, { timeoutMs = 20000 } = {}) {
 
 /**
  * Install LAN-safe full tunnel via WireGuard service (proper Windows routes + endpoint bypass).
- * Manual New-NetRoute after bootstrap was blackholing the VPN server IP.
  */
-async function enableFullTunnelRoutes(helper, _peerPublicKey, fullConfPath) {
+async function enableFullTunnelRoutes(helper, fullConfPath) {
   const fullText = fs.readFileSync(fullConfPath, 'utf8');
   const lanSafe = buildLanSafeFullConf(fullText);
   const outPath = fullTunnelConfPath();
@@ -972,24 +1013,26 @@ async function checkTunneledInternet(fullConf, { timeoutMs = 12000 } = {}) {
   return false;
 }
 
-async function waitForDeviceSynced(deviceId, { timeoutMs = 45000 } = {}) {
+/** Resolves with the synced config, or null if cancelled. */
+async function waitForDeviceSynced(deviceId, { timeoutMs = 45000, isCancelled = () => false } = {}) {
   const started = Date.now();
   let last = null;
-  progress('sync', 'Waiting for server to register your peer…');
+  progress('sync', 'Preparing your connection…');
   while (Date.now() - started < timeoutMs) {
+    if (isCancelled()) return null;
     last = await api(`/api/devices/${deviceId}/config`);
     log('info', 'sync:poll', { syncStatus: last.syncStatus, elapsedMs: Date.now() - started });
     if (last.syncStatus === 'synced') {
-      progress('sync', 'Peer registered on server');
+      progress('sync', 'Server ready');
       return last;
     }
     if (last.syncStatus === 'delete_pending') {
-      throw new Error('Device was removed. Try Connect again.');
+      throw new Error('This device was removed. Try Connect again.');
     }
     if (last.syncStatus === 'idle') {
-      throw new Error('VPN session ended on the server. Click Connect again.');
+      throw new Error('Your session ended. Click Connect again.');
     }
-    progress('sync', `Waiting for server sync… (${last.syncStatus || 'pending'})`);
+    progress('sync', 'Preparing your connection…');
     await sleep(2000);
   }
   log('error', 'sync:timeout', { syncStatus: last?.syncStatus, deviceId });
@@ -1003,7 +1046,12 @@ async function releaseServerSession({ reason = 'disconnect' } = {}) {
   const deviceId = store.get('deviceId');
   if (!deviceId || !store.get('token')) return;
   try {
-    const result = await api(`/api/devices/${deviceId}/disconnect`, { method: 'POST', body: {} });
+    const result = await api(`/api/devices/${deviceId}/disconnect`, {
+      method: 'POST',
+      body: {},
+      // Quit and disconnect wait on this; the server reaps the session anyway if it never arrives.
+      timeoutMs: 8000,
+    });
     log('info', 'session:released', { reason, result });
   } catch (err) {
     log('info', 'session:release-failed', { reason, error: err.message });
@@ -1027,12 +1075,11 @@ async function ensureTunnelRuntime() {
   if (!elevated) {
     return {
       ok: false,
-      error:
-        'Administrator rights are required to install network components under RB-VPN. Restart RB-VPN and approve the admin prompt.',
+      error: 'Administrator rights are required. Restart RB-VPN and approve the admin prompt.',
     };
   }
 
-  progress('runtime', 'Installing network components under RB-VPN…');
+  progress('runtime', 'Preparing secure network…');
 
   if (bundled) {
     const copy = await elevatedBatch(installPreferredRuntimeBatchLines(bundled), 'rbvpn-copy-runtime');
@@ -1069,8 +1116,7 @@ async function ensureTunnelRuntime() {
   if (!fs.existsSync(preferred)) {
     return {
       ok: false,
-      error:
-        'Could not install network components under C:\\Program Files\\RB-VPN\\WireGuard. Reinstall RB-VPN Setup, then try Connect again.',
+      error: 'Could not prepare the secure network. Reinstall RB-VPN Setup, then try Connect again.',
     };
   }
 
@@ -1078,13 +1124,25 @@ async function ensureTunnelRuntime() {
   return { ok: true, helper: preferred };
 }
 
-ipcMain.handle('connect', async () => {
-  clearLog();
-  progress('connect', 'Connect started');
+// Bumped by Disconnect/Quit so an in-flight connect or watchdog reconnect stops at its next step.
+let connectGeneration = 0;
+function cancelPendingConnects() {
+  connectGeneration += 1;
+}
+
+const CANCELLED = { ok: false, cancelled: true, error: 'Connection cancelled.' };
+
+async function connectFlow({ reconnect = false } = {}) {
+  const generation = connectGeneration;
+  const cancelled = () => generation !== connectGeneration;
+
+  if (!reconnect) clearLog();
+  progress('connect', reconnect ? 'Reconnecting…' : 'Connecting…');
   const deviceId = store.get('deviceId');
   log('info', 'connect:begin', {
     conf: confPath(),
     deviceId,
+    reconnect,
     helper: findTunnelHelper(),
   });
 
@@ -1092,14 +1150,16 @@ ipcMain.handle('connect', async () => {
     return { ok: false, error: 'No device profile yet. Sign in and select a node first.' };
   }
 
+  let config;
   try {
-    progress('sync', 'Requesting VPN IP from server…');
+    progress('sync', 'Requesting connection…');
     const started = await api(`/api/devices/${deviceId}/connect`, { method: 'POST', body: {} });
     log('info', 'session:started', {
       address: started.address,
       syncStatus: started.syncStatus,
     });
-    const config = await waitForDeviceSynced(deviceId);
+    config = await waitForDeviceSynced(deviceId, { isCancelled: cancelled });
+    if (!config) return CANCELLED;
     fs.writeFileSync(confPath(), config.conf, 'utf8');
     log('info', 'connect:config-written', { address: config.address });
   } catch (err) {
@@ -1114,16 +1174,16 @@ ipcMain.handle('connect', async () => {
     await releaseServerSession({ reason: 'runtime-failed' });
     return runtime;
   }
+  if (cancelled()) return CANCELLED;
 
   const fullConf = fs.readFileSync(confPath(), 'utf8');
-  const { peerPublicKey } = parseClientConf(fullConf);
 
-  // One-shot LAN-safe tunnel (WireGuard service owns routes). Avoids bootstrap→manual
-  // route expansion that blackholed the VPN endpoint while another peer (.6) works fine.
-  progress('tunnel', 'Starting VPN tunnel…');
-  const startedOk = await enableFullTunnelRoutes(runtime.helper, peerPublicKey, confPath());
+  // One-shot LAN-safe tunnel (WireGuard service owns routes).
+  progress('tunnel', 'Starting connection…');
+  const startedOk = await enableFullTunnelRoutes(runtime.helper, confPath());
+  if (cancelled()) return CANCELLED;
   if (!startedOk) {
-    progress('tunnel', 'Elevated start failed — trying without UAC…');
+    progress('tunnel', 'Retrying connection…');
     const outPath = fullTunnelConfPath();
     if (!fs.existsSync(outPath)) {
       fs.writeFileSync(outPath, buildLanSafeFullConf(fullConf), 'utf8');
@@ -1141,46 +1201,220 @@ ipcMain.handle('connect', async () => {
       await releaseServerSession({ reason: 'tunnel-start-failed' });
       return {
         ok: false,
-        error:
-          'Could not start the RB-VPN tunnel. Approve the administrator prompt, then click Connect again.',
-        detail: fallback.stderr || (fallback.err && fallback.err.message),
+        error: 'Could not start the connection. Approve the admin prompt, then click Connect again.',
         logFile: logPath(),
       };
     }
   }
 
-  const handshook = await waitForTunnelHandshake(runtime.helper, { timeoutMs: 25000 });
+  const handshook = await waitForTunnelHandshake(runtime.helper, {
+    timeoutMs: 25000,
+    isCancelled: cancelled,
+  });
+  if (cancelled()) return CANCELLED;
   if (!handshook) {
     await stopTunnel({ reason: 'handshake-timeout' });
     return {
       ok: false,
       error:
-        'VPN could not reach the server (no handshake). Check firewall/UDP to the VPN server, try another network or node, then Connect again.',
+        'Could not reach the selected server. Try another network or node, then Connect again.',
       logFile: logPath(),
     };
   }
 
-  progress('tunnel', 'Checking internet through VPN…');
+  progress('tunnel', 'Verifying connection…');
   const online = await checkTunneledInternet(fullConf, { timeoutMs: 12000 });
+  if (cancelled()) return CANCELLED;
   if (!online) {
     await stopTunnel({ reason: 'no-internet' });
     return {
       ok: false,
       error:
-        'VPN reached the server but internet through the tunnel failed. Your network was restored. Try another node, or contact support if every node fails.',
+        'Connected to the server but internet access failed. Your network was restored. Try another node, or contact support if every node fails.',
       logFile: logPath(),
     };
   }
 
   progress('connect', 'Connected');
-  return { ok: true, mode: 'service', message: 'Connected', logFile: logPath() };
+  return {
+    ok: true,
+    mode: 'service',
+    message: 'Connected',
+    logFile: logPath(),
+    helper: runtime.helper,
+    address: config.address,
+  };
+}
+
+/* ---------- Connection watchdog ----------
+ * After Connect, check the tunnel every 30s. If the server stops answering (VPS reboot, session
+ * released, plan ended), recover automatically or disconnect so the PC is never left without internet.
+ */
+const WATCHDOG_INTERVAL_MS = 30 * 1000;
+// Live WireGuard sessions re-handshake every 2 minutes (keepalive keeps them live); older means traffic stopped.
+const HANDSHAKE_STALE_SECONDS = 180;
+const RESET_AFTER_MS = 2 * 60 * 1000;
+const GIVE_UP_AFTER_MS = 5 * 60 * 1000;
+const LOST_SERVER_MESSAGE =
+  'Lost contact with the VPN server. Your normal connection was restored — click Connect to try again.';
+
+let watchdog = null;
+let watchdogTickQueued = false;
+
+function startWatchdog(helper, address) {
+  stopWatchdog();
+  watchdog = {
+    helper,
+    address,
+    staleSince: 0,
+    resetTried: false,
+    timer: setInterval(scheduleWatchdogTick, WATCHDOG_INTERVAL_MS),
+  };
+}
+
+function stopWatchdog() {
+  if (watchdog) clearInterval(watchdog.timer);
+  watchdog = null;
+}
+
+function scheduleWatchdogTick() {
+  if (!watchdog || watchdogTickQueued) return;
+  watchdogTickQueued = true;
+  runTunnelOp(async () => {
+    watchdogTickQueued = false;
+    await watchdogTick();
+  }).catch((err) => log('error', 'watchdog:tick-failed', err.message || String(err)));
+}
+
+async function watchdogGiveUp(message) {
+  log('info', 'watchdog:give-up', { message });
+  stopWatchdog();
+  const result = await stopTunnel({ reason: 'watchdog' });
+  const text = result.ok ? message : `${message} ${result.error}`;
+  setTunnelState('disconnected', text);
+  // The window is often hidden in the tray; tell the user why the VPN went away.
+  if (Notification.isSupported()) {
+    new Notification({ title: 'RB-VPN disconnected', body: text, icon: loadAppIcon() }).show();
+  }
+}
+
+async function watchdogReconnect(reason) {
+  log('info', 'watchdog:reconnect', { reason });
+  const result = await connectFlow({ reconnect: true });
+  if (result.cancelled) return;
+  if (result.ok) {
+    startWatchdog(result.helper, result.address);
+    setTunnelState('connected', 'Reconnected.');
+    return;
+  }
+  await watchdogGiveUp(result.error || 'Could not reconnect. Click Connect to try again.');
+}
+
+async function watchdogTick() {
+  const dog = watchdog;
+  if (!dog || isQuitting) return;
+
+  if (!(await isTunnelServiceRunning())) {
+    log('info', 'watchdog:service-stopped');
+    await watchdogGiveUp('The VPN connection was closed outside RB-VPN. Click Connect to reconnect.');
+    return;
+  }
+
+  const age = await latestHandshakeAgeSeconds(dog.helper);
+  if (age <= HANDSHAKE_STALE_SECONDS) {
+    if (dog.staleSince) {
+      log('info', 'watchdog:healthy-again', { staleForMs: Date.now() - dog.staleSince });
+      dog.staleSince = 0;
+      dog.resetTried = false;
+      setTunnelState('connected', 'Connection restored.');
+    }
+    return;
+  }
+
+  if (!dog.staleSince) dog.staleSince = Date.now();
+  const staleForMs = Date.now() - dog.staleSince;
+  log('info', 'watchdog:stale', {
+    handshakeAgeSeconds: Number.isFinite(age) ? Math.round(age) : null,
+    staleForMs,
+  });
+  if (tunnelState !== 'reconnecting') {
+    setTunnelState('reconnecting', 'Connection interrupted — reconnecting…');
+  }
+
+  let session;
+  try {
+    session = await api(`/api/devices/${store.get('deviceId')}/config`);
+  } catch (err) {
+    if (err.status === 402) {
+      return watchdogGiveUp('Your plan has ended. Renew it on the website, then click Connect.');
+    }
+    if (err.status === 401 || err.status === 403) {
+      return watchdogGiveUp('You were signed out. Sign in again to connect.');
+    }
+    if (err.status === 404) {
+      return watchdogGiveUp('This device was removed from your account. Click Connect to set it up again.');
+    }
+    if (err.status === 409) return watchdogReconnect('session-released');
+    // Server unreachable: the network may come back on its own.
+    if (staleForMs >= GIVE_UP_AFTER_MS) return watchdogGiveUp(LOST_SERVER_MESSAGE);
+    return;
+  }
+
+  if (!['pending', 'synced'].includes(session.syncStatus) || session.address !== dog.address) {
+    return watchdogReconnect('session-changed');
+  }
+  // The server still holds the session and its agent restores missing peers within seconds; reset once.
+  if (staleForMs >= RESET_AFTER_MS && !dog.resetTried) {
+    dog.resetTried = true;
+    await releaseServerSession({ reason: 'watchdog-reset' });
+    return watchdogReconnect('reset');
+  }
+  if (staleForMs >= GIVE_UP_AFTER_MS) return watchdogGiveUp(LOST_SERVER_MESSAGE);
+}
+
+function publicConnectResult(result) {
+  const { helper, address, ...rest } = result;
+  return rest;
+}
+
+ipcMain.handle('connect', () =>
+  runTunnelOp(async () => {
+    stopWatchdog();
+    setTunnelState('connecting');
+    const result = await connectFlow();
+    if (result.ok) {
+      startWatchdog(result.helper, result.address);
+      setTunnelState('connected');
+    } else if (!result.cancelled) {
+      setTunnelState('disconnected', result.error);
+    }
+    return publicConnectResult(result);
+  })
+);
+
+ipcMain.handle('disconnect', () => {
+  cancelPendingConnects();
+  return runTunnelOp(async () => {
+    const previous = watchdog;
+    stopWatchdog();
+    setTunnelState('disconnecting');
+    const result = await stopTunnel({ reason: 'disconnect' });
+    if (result.ok) {
+      progress('disconnect', 'Disconnected');
+      setTunnelState('disconnected');
+    } else if (await isTunnelServiceRunning()) {
+      // Still up: keep supervising it so the UI and watchdog stay truthful.
+      const helper = previous?.helper || findTunnelHelper();
+      if (helper) startWatchdog(helper, previous?.address || null);
+      setTunnelState('connected', result.error);
+    } else {
+      setTunnelState('disconnected', result.error);
+    }
+    return { ...result, logFile: logPath() };
+  });
 });
 
-ipcMain.handle('disconnect', async () => {
-  const result = await stopTunnel({ reason: 'disconnect' });
-  if (result.ok) progress('disconnect', 'Disconnected');
-  return { ...result, logFile: logPath() };
-});
+ipcMain.handle('get-tunnel-state', () => ({ state: tunnelState }));
 
 ipcMain.handle('tunnel-status', async () => {
   const installed = await isTunnelServiceInstalled();
@@ -1193,9 +1427,6 @@ ipcMain.handle('tunnel-status', async () => {
   };
 });
 
-ipcMain.handle('show-conf-path', async () => confPath());
-ipcMain.handle('get-log-path', async () => logPath());
-ipcMain.handle('get-log-tail', async () => ({ path: logPath(), text: readLogTail() }));
 ipcMain.handle('open-log', async () => {
   const { shell } = require('electron');
   const p = logPath();

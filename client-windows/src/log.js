@@ -33,12 +33,4 @@ function clearLog() {
   }
 }
 
-function readLogTail(maxBytes = 32_000) {
-  const p = logPath();
-  if (!fs.existsSync(p)) return '';
-  const buf = fs.readFileSync(p);
-  if (buf.length <= maxBytes) return buf.toString('utf8');
-  return buf.subarray(buf.length - maxBytes).toString('utf8');
-}
-
-module.exports = { log, logPath, clearLog, readLogTail };
+module.exports = { log, logPath, clearLog };

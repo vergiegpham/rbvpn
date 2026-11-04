@@ -7,6 +7,8 @@ import { clearAuth, getStoredUser } from '@/lib/api';
 const links = [
   { href: '/admin', label: 'Overview' },
   { href: '/admin/users', label: 'Users' },
+  { href: '/admin/devices', label: 'Devices' },
+  { href: '/admin/payments', label: 'Payments' },
   { href: '/admin/messages', label: 'Messages' },
   { href: '/admin/nodes', label: 'Nodes' },
   { href: '/admin/plans', label: 'Plans' },

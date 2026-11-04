@@ -1,71 +1,66 @@
-import { Router } from 'express';
 import { z } from 'zod';
 import { authRequired } from '../middleware/auth.js';
 import { prisma } from '../utils/db.js';
+import { env } from '../utils/env.js';
+import { createRouter } from '../utils/router.js';
 import {
   createStripeCheckout,
   createCryptoInvoice,
   handleCryptoIpn,
   completePayment,
+  isMockPayment,
+  paymentProviders,
 } from '../services/payments.js';
 
-const router = Router();
+const router = createRouter();
+
+router.get('/providers', (_req, res) => {
+  res.json({ providers: paymentProviders() });
+});
 
 router.post('/checkout', authRequired, async (req, res) => {
-  try {
-    const schema = z.object({
-      planCode: z.string(),
-      provider: z.enum(['stripe', 'crypto']),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
+  const schema = z.object({
+    planCode: z.string(),
+    provider: z.enum(['stripe', 'crypto']),
+  });
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
 
-    const plan = await prisma.plan.findFirst({
-      where: { code: parsed.data.planCode, active: true },
-    });
-    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+  const plan = await prisma.plan.findFirst({
+    where: { code: parsed.data.planCode, active: true },
+  });
+  if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-    const user = await prisma.user.findUnique({ where: { id: req.user.sub } });
-    const result =
-      parsed.data.provider === 'stripe'
-        ? await createStripeCheckout({ user, plan })
-        : await createCryptoInvoice({ user, plan });
+  const user = await prisma.user.findUnique({ where: { id: req.user.sub } });
+  const result =
+    parsed.data.provider === 'stripe'
+      ? await createStripeCheckout({ user, plan })
+      : await createCryptoInvoice({ user, plan });
 
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json(result);
 });
 
 router.post('/crypto/ipn', async (req, res) => {
-  try {
-    const result = await handleCryptoIpn(req.body || {});
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const result = await handleCryptoIpn(req.body || {}, req.headers['x-nowpayments-sig']);
+  res.json(result);
 });
 
-/** Dev-only helper when Stripe/NOWPayments keys are not configured */
+/** Test checkout only — requires ALLOW_MOCK_PAYMENTS=true and a payment created in mock mode. */
 router.post('/mock/complete', authRequired, async (req, res) => {
+  if (!env.allowMockPayments) {
+    return res.status(403).json({ error: 'Test payments are disabled on this server.' });
+  }
   const { paymentId } = req.body || {};
   if (!paymentId) return res.status(400).json({ error: 'paymentId required' });
   const payment = await prisma.payment.findFirst({
-    where: { id: paymentId, userId: req.user.sub },
+    where: { id: String(paymentId), userId: req.user.sub },
   });
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
+  if (!isMockPayment(payment)) {
+    return res.status(400).json({ error: 'This payment can only be completed by the payment provider.' });
+  }
   await completePayment(payment.id, JSON.stringify({ mock: true }));
   res.json({ ok: true });
-});
-
-router.get('/mine', authRequired, async (req, res) => {
-  const payments = await prisma.payment.findMany({
-    where: { userId: req.user.sub },
-    include: { plan: { select: { name: true, code: true } } },
-    orderBy: { createdAt: 'desc' },
-    take: 20,
-  });
-  res.json({ payments });
 });
 
 export default router;

@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('rbvpn', {
+  getVersion: () => ipcRenderer.invoke('get-version'),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (data) => ipcRenderer.invoke('save-settings', data),
   logout: () => ipcRenderer.invoke('logout'),
@@ -12,13 +13,16 @@ contextBridge.exposeInMainWorld('rbvpn', {
   connect: () => ipcRenderer.invoke('connect'),
   disconnect: () => ipcRenderer.invoke('disconnect'),
   tunnelStatus: () => ipcRenderer.invoke('tunnel-status'),
-  showConfPath: () => ipcRenderer.invoke('show-conf-path'),
-  getLogPath: () => ipcRenderer.invoke('get-log-path'),
-  getLogTail: () => ipcRenderer.invoke('get-log-tail'),
+  getTunnelState: () => ipcRenderer.invoke('get-tunnel-state'),
   openLog: () => ipcRenderer.invoke('open-log'),
   onConnectProgress: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('connect-progress', handler);
     return () => ipcRenderer.removeListener('connect-progress', handler);
+  },
+  onTunnelState: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('tunnel-state', handler);
+    return () => ipcRenderer.removeListener('tunnel-state', handler);
   },
 });

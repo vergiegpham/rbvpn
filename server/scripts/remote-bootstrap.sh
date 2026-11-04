@@ -6,8 +6,6 @@ WG_IFACE="${WG_IFACE:-wg0}"
 WG_ADDR="${WG_ADDR:-10.10.0.1/24}"
 API_PORT="${API_PORT:-4000}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/rbvpn}"
-NODE_AGENT_SECRET="${NODE_AGENT_SECRET:-rbvpn-dev-node-agent-secret}"
-JWT_SECRET="${JWT_SECRET:-rbvpn-prod-jwt-change-me}"
 NODE_ID="${NODE_ID:-seed-node-us}"
 
 export DEBIAN_FRONTEND=noninteractive
@@ -48,6 +46,23 @@ PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null || true; ipt
 EOF
 
 chmod 600 /etc/wireguard/${WG_IFACE}.conf
+
+# Persist IP forwarding across reboot (UFW can leave it off otherwise).
+mkdir -p /etc/sysctl.d
+cat >/etc/sysctl.d/99-rbvpn-forward.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.forwarding=1
+EOF
+sysctl -w net.ipv4.ip_forward=1
+sysctl -w net.ipv4.conf.all.forwarding=1
+if grep -q '^net/ipv4/ip_forward=' /etc/ufw/sysctl.conf 2>/dev/null; then
+  sed -i 's|^net/ipv4/ip_forward=.*|net/ipv4/ip_forward=1|' /etc/ufw/sysctl.conf
+elif grep -q '^#net/ipv4/ip_forward=' /etc/ufw/sysctl.conf 2>/dev/null; then
+  sed -i 's|^#net/ipv4/ip_forward=.*|net/ipv4/ip_forward=1|' /etc/ufw/sysctl.conf
+else
+  echo 'net/ipv4/ip_forward=1' >> /etc/ufw/sysctl.conf
+fi
+
 systemctl enable wg-quick@${WG_IFACE}
 systemctl restart wg-quick@${WG_IFACE} || systemctl start wg-quick@${WG_IFACE}
 

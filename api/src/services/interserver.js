@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import soap from 'soap';
 import { env } from '../utils/env.js';
 
@@ -178,13 +179,14 @@ export function generateRootPassword() {
   const digits = '23456789';
   const special = '!@#$%&*';
   const all = upper + lower + digits + special;
-  const pick = (set) => set[Math.floor(Math.random() * set.length)];
-  let pass = pick(upper) + pick(lower) + pick(digits) + pick(special);
-  for (let i = 0; i < 12; i++) pass += pick(all);
-  return pass
-    .split('')
-    .sort(() => Math.random() - 0.5)
-    .join('');
+  const pick = (set) => set[crypto.randomInt(set.length)];
+  const chars = [pick(upper), pick(lower), pick(digits), pick(special)];
+  for (let i = 0; i < 12; i++) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 }
 
 export async function findServiceByHostname(hostname, { attempts = 12, delayMs = 5000 } = {}) {

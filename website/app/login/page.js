@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import SiteNav from '@/components/SiteNav';
-import { api, setAuth } from '@/lib/api';
+import { api, safeNextPath, setAuth } from '@/lib/api';
 
 function LoginForm() {
   const params = useSearchParams();
@@ -21,10 +21,11 @@ function LoginForm() {
       const data = await api('/api/auth/login', {
         method: 'POST',
         body: { email, password },
+        auth: false,
       });
       setAuth(data.token, data.user);
-      const next = params.get('next');
-      if (next && next.startsWith('/')) {
+      const next = safeNextPath(params.get('next'));
+      if (next) {
         window.location.href = next;
       } else if (data.user.role === 'admin') {
         window.location.href = '/admin';
@@ -43,12 +44,19 @@ function LoginForm() {
       <h1>Log in</h1>
       <p className="lead">Access your RB-VPN dashboard.</p>
       <label>Email</label>
-      <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+      <input
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        type="email"
+        autoComplete="username"
+        required
+      />
       <label>Password</label>
       <input
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         type="password"
+        autoComplete="current-password"
         required
       />
       <button className="btn-primary btn-block" disabled={loading}>
@@ -57,6 +65,10 @@ function LoginForm() {
       <p className="error">{error}</p>
       <p className="lead">
         New here? <Link href="/register">Create an account</Link>
+      </p>
+      <p className="lead" style={{ fontSize: '0.9rem' }}>
+        Forgot your password? <Link href="/contact">Contact support</Link> from your account email
+        and we will reset it.
       </p>
     </form>
   );

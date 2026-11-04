@@ -4,7 +4,81 @@ import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import SiteNav from '@/components/SiteNav';
-import { api, getStoredUser, getToken, clearAuth } from '@/lib/api';
+import SiteFooter from '@/components/SiteFooter';
+import { api, getStoredUser, getToken, clearAuth, setAuth } from '@/lib/api';
+
+function deviceStatus(d) {
+  switch (d.syncStatus) {
+    case 'synced':
+      return { label: `Connected${d.clientIp ? ` · ${d.clientIp}` : ''}`, tone: 'live' };
+    case 'pending':
+      return { label: 'Connecting…', tone: 'busy' };
+    case 'release_pending':
+      return { label: 'Disconnecting…', tone: 'busy' };
+    default:
+      return { label: 'Not connected', tone: '' };
+  }
+}
+
+function ChangePasswordPanel() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState('');
+  const [error, setError] = useState('');
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    setOk('');
+    setError('');
+    setBusy(true);
+    try {
+      const data = await api('/api/auth/change-password', {
+        method: 'POST',
+        body: { currentPassword, newPassword },
+      });
+      setAuth(data.token, data.user);
+      setCurrentPassword('');
+      setNewPassword('');
+      setOk('Password updated. Other browsers and the Windows app need the new password.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <h3>Change password</h3>
+      <form onSubmit={onSubmit}>
+        <label>Current password</label>
+        <input
+          type="password"
+          autoComplete="current-password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          required
+        />
+        <label>New password (8–72 characters)</label>
+        <input
+          type="password"
+          autoComplete="new-password"
+          minLength={8}
+          maxLength={72}
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          required
+        />
+        <button className="btn-primary" disabled={busy}>
+          {busy ? 'Saving…' : 'Update password'}
+        </button>
+      </form>
+      {ok && <p className="ok">{ok}</p>}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
 
 function DashboardInner() {
   const params = useSearchParams();
@@ -26,12 +100,12 @@ function DashboardInner() {
     setDevices(devs.devices || []);
     const list = nodeList.nodes || [];
     setNodes(list);
-    if (!selectedNodeId && list[0]) setSelectedNodeId(list[0].id);
+    setSelectedNodeId((current) => current || list[0]?.id || '');
   }
 
   useEffect(() => {
     if (!getToken()) {
-      window.location.href = '/login';
+      window.location.href = '/login?next=/dashboard';
       return;
     }
     setUser(getStoredUser());
@@ -44,10 +118,10 @@ function DashboardInner() {
             method: 'POST',
             body: { paymentId: mockPay },
           });
-          setMessage('Mock payment completed. Subscription activated.');
+          setMessage('Test payment completed. Subscription activated.');
           window.history.replaceState({}, '', '/dashboard');
         } else if (params.get('paid') === '1') {
-          setMessage('Payment received. If subscription is not visible yet, refresh in a few seconds.');
+          setMessage('Payment received. If your plan is not visible yet, refresh in a few seconds.');
         }
         await refresh();
       } catch (err) {
@@ -67,7 +141,7 @@ function DashboardInner() {
         },
       });
       await refresh();
-      setMessage('Device created on selected node. All plans can use every node.');
+      setMessage('Device created on the selected node.');
     } catch (err) {
       setError(err.message);
     }
@@ -88,11 +162,13 @@ function DashboardInner() {
     }
   }
 
-  async function removeDevice(id) {
+  async function removeDevice(device) {
+    if (!window.confirm(`Remove "${device.name}"? If it is connected, it will be disconnected.`)) return;
     setError('');
     try {
-      await api(`/api/devices/${id}`, { method: 'DELETE' });
+      await api(`/api/devices/${device.id}`, { method: 'DELETE' });
       await refresh();
+      setMessage('Device removed.');
     } catch (err) {
       setError(err.message);
     }
@@ -116,9 +192,12 @@ function DashboardInner() {
                   <strong>{subscription.plan.name}</strong> · active until{' '}
                   {new Date(subscription.endsAt).toLocaleString()}
                 </p>
-                <p className="lead">All active nodes are available on every plan.</p>
+                <p className="lead">
+                  Up to {subscription.plan.maxDevices} device
+                  {subscription.plan.maxDevices > 1 ? 's' : ''} · all active nodes.
+                </p>
                 <Link href="/pricing" className="ghost-btn">
-                  Change plan
+                  Extend or change plan
                 </Link>
               </>
             ) : (
@@ -133,7 +212,7 @@ function DashboardInner() {
 
           <div className="panel">
             <h3>Windows app</h3>
-            <p className="lead">Download the RB-VPN .msi, install, and sign in with this account.</p>
+            <p className="lead">Download the RB-VPN installer, sign in with this account, and click Connect.</p>
             <Link href="/download" className="btn-primary">
               Download app
             </Link>
@@ -156,41 +235,55 @@ function DashboardInner() {
                   </option>
                 ))}
               </select>
-              <button className="ghost-btn" onClick={addDevice} type="button">
+              <button className="ghost-btn" onClick={addDevice} type="button" disabled={!subscription}>
                 Add device
               </button>
             </div>
           </div>
           {devices.length === 0 && (
-            <p className="lead">No devices yet. Pick any node above, or let the Windows app create one.</p>
+            <p className="lead">
+              No devices yet. The Windows app creates one automatically the first time you connect.
+            </p>
           )}
-          {devices.map((d) => (
-            <div className="device-item" key={d.id}>
-              <div>
-                <strong>{d.name}</strong>
-                <div className="lead" style={{ margin: 0 }}>
-                  {d.node?.name} · {d.node?.region} ·{' '}
-                  {d.syncStatus === 'synced' ? 'ready' : 'provisioning'}
+          {devices.map((d) => {
+            const status = deviceStatus(d);
+            return (
+              <div className="device-item" key={d.id}>
+                <div>
+                  <strong>{d.name}</strong>
+                  <div className="lead" style={{ margin: 0 }}>
+                    {d.node?.name} · {d.node?.region} ·{' '}
+                    <span className={`status-badge ${status.tone}`}>{status.label}</span>
+                  </div>
+                  {d.lastSeenAt && (
+                    <div className="lead" style={{ margin: 0, fontSize: '0.85rem' }}>
+                      Last active {new Date(d.lastSeenAt).toLocaleString()}
+                    </div>
+                  )}
+                </div>
+                <div className="pay-row">
+                  <select
+                    value={d.node?.id || ''}
+                    onChange={(e) => switchNode(d.id, e.target.value)}
+                    style={{ width: 'auto', minWidth: 160 }}
+                  >
+                    {nodes.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="ghost-btn" type="button" onClick={() => removeDevice(d)}>
+                    Remove
+                  </button>
                 </div>
               </div>
-              <div className="pay-row">
-                <select
-                  defaultValue={d.node?.id || ''}
-                  onChange={(e) => switchNode(d.id, e.target.value)}
-                  style={{ width: 'auto', minWidth: 160 }}
-                >
-                  {nodes.map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.name}
-                    </option>
-                  ))}
-                </select>
-                <button className="ghost-btn" type="button" onClick={() => removeDevice(d.id)}>
-                  Remove
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
+        </div>
+
+        <div className="dash-grid" style={{ marginTop: '1rem' }}>
+          <ChangePasswordPanel />
         </div>
 
         <button
@@ -205,6 +298,7 @@ function DashboardInner() {
           Log out
         </button>
       </section>
+      <SiteFooter />
     </div>
   );
 }

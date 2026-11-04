@@ -15,10 +15,16 @@ vps info
 vps-info*
 *.pem
 *.ppk
+*.pfx
+*.p12
+client-windows/certs/
 client-windows/dist/
+client-windows/dist-msi/
 client-windows/dist-build/
 client-windows/dist-out/
 client-windows/vendor/
 client-windows/electron-win.zip
 website/public/downloads/*.exe
 website/public/downloads/*.msi
+__pycache__/
+*.pyc

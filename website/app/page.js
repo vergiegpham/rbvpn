@@ -1,5 +1,5 @@
-import Link from 'next/link';
 import SiteNav from '@/components/SiteNav';
+import SiteFooter from '@/components/SiteFooter';
 import HeroCta from '@/components/HeroCta';
 
 export default function HomePage() {
@@ -112,9 +112,7 @@ export default function HomePage() {
         <HeroCta variant="footer" />
       </section>
 
-      <footer>
-        © {new Date().getFullYear()} RB-VPN · <Link href="/contact">Contact us</Link>
-      </footer>
+      <SiteFooter />
     </main>
   );
 }

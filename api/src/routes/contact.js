@@ -1,36 +1,22 @@
-import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../utils/db.js';
+import { createRouter } from '../utils/router.js';
+import { createRateLimiter } from '../utils/rate-limit.js';
 
-const router = Router();
+const router = createRouter();
 
-// Simple in-memory rate limit: max 5 messages per IP per 10 minutes
-const recent = new Map();
-
-function tooMany(ip) {
-  const now = Date.now();
-  const windowMs = 10 * 60 * 1000;
-  const list = (recent.get(ip) || []).filter((t) => now - t < windowMs);
-  if (list.length >= 5) {
-    recent.set(ip, list);
-    return true;
-  }
-  list.push(now);
-  recent.set(ip, list);
-  return false;
-}
+const perIp = createRateLimiter({ windowMs: 10 * 60 * 1000, max: 5 });
 
 router.post('/', async (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.ip || 'unknown';
-  if (tooMany(ip)) {
+  if (perIp.hit(req.ip || 'unknown')) {
     return res.status(429).json({ error: 'Too many messages. Please try again later.' });
   }
 
   const schema = z.object({
-    name: z.string().min(1).max(80),
-    email: z.string().email().max(120),
-    subject: z.string().min(1).max(120),
-    message: z.string().min(10).max(4000),
+    name: z.string().trim().min(1).max(80),
+    email: z.string().trim().email().max(120),
+    subject: z.string().trim().min(1).max(120),
+    message: z.string().trim().min(10).max(4000),
   });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) {
@@ -39,10 +25,10 @@ router.post('/', async (req, res) => {
 
   const msg = await prisma.contactMessage.create({
     data: {
-      name: parsed.data.name.trim(),
-      email: parsed.data.email.trim().toLowerCase(),
-      subject: parsed.data.subject.trim(),
-      message: parsed.data.message.trim(),
+      name: parsed.data.name,
+      email: parsed.data.email.toLowerCase(),
+      subject: parsed.data.subject,
+      message: parsed.data.message,
       status: 'new',
     },
   });
