@@ -26,5 +26,6 @@ client-windows/vendor/
 client-windows/electron-win.zip
 website/public/downloads/*.exe
 website/public/downloads/*.msi
+website/*.zip
 __pycache__/
 *.pyc
