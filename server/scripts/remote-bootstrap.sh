@@ -6,6 +6,8 @@ WG_IFACE="${WG_IFACE:-wg0}"
 WG_ADDR="${WG_ADDR:-10.10.0.1/24}"
 API_PORT="${API_PORT:-4000}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/rbvpn}"
+NODE_AGENT_SECRET="${NODE_AGENT_SECRET:-rbvpn-dev-node-agent-secret}"
+JWT_SECRET="${JWT_SECRET:-rbvpn-prod-jwt-change-me}"
 NODE_ID="${NODE_ID:-seed-node-us}"
 
 export DEBIAN_FRONTEND=noninteractive

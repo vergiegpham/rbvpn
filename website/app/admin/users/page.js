@@ -12,7 +12,6 @@ export default function AdminUsersPage() {
   const [q, setQ] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [tempPassword, setTempPassword] = useState(null);
 
   async function load(search = q) {
     const data = await api(`/api/admin/users${search ? `?q=${encodeURIComponent(search)}` : ''}`);
@@ -98,22 +97,6 @@ export default function AdminUsersPage() {
     }
   }
 
-  async function resetPassword(user) {
-    const ok = window.confirm(
-      `Reset the password for "${user.email}"?\n\nThey will be signed out everywhere and must use the temporary password you give them.`
-    );
-    if (!ok) return;
-    setError('');
-    setMessage('');
-    setTempPassword(null);
-    try {
-      const result = await api(`/api/admin/users/${user.id}/reset-password`, { method: 'POST' });
-      setTempPassword({ email: user.email, password: result.temporaryPassword });
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   async function removeUser(user) {
     const ok = window.confirm(
       `Delete user "${user.email}"?\n\nThis removes their account, subscriptions, devices, and payment history. This cannot be undone.`
@@ -145,13 +128,6 @@ export default function AdminUsersPage() {
       </div>
       {message && <p className="ok">{message}</p>}
       {error && <p className="error">{error}</p>}
-      {tempPassword && (
-        <p className="notice">
-          Temporary password for <strong>{tempPassword.email}</strong>:{' '}
-          <span className="temp-secret">{tempPassword.password}</span> — share it securely; it is
-          not shown again. They can change it from their dashboard.
-        </p>
-      )}
 
       <section className="admin-panel">
         <table className="admin-table">
@@ -233,9 +209,6 @@ export default function AdminUsersPage() {
                         Suspend
                       </button>
                     )}
-                    <button type="button" className="ghost-btn" onClick={() => resetPassword(u)}>
-                      Reset password
-                    </button>
                     <button
                       type="button"
                       className="ghost-btn admin-btn-danger"

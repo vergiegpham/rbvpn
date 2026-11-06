@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import SiteNav from '@/components/SiteNav';
-import SiteFooter from '@/components/SiteFooter';
 import { getStoredUser, getToken } from '@/lib/api';
 
 export default function DownloadPage() {
@@ -72,7 +71,6 @@ export default function DownloadPage() {
           </div>
         </div>
       </section>
-      <SiteFooter />
     </div>
   );
 }

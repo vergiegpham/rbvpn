@@ -26,40 +26,18 @@ export function getStoredUser() {
   }
 }
 
-/** Only same-site paths; `//host` would leave the site. */
-export function safeNextPath(next) {
-  return typeof next === 'string' && next.startsWith('/') && !next.startsWith('//') ? next : null;
-}
-
-/**
- * `auth: false` for login/register so a stale token never rides along.
- * `redirectOn401: false` on public pages: an expired session just signs out quietly.
- */
-export async function api(path, { method = 'GET', body, token, auth = true, redirectOn401 = true } = {}) {
+export async function api(path, { method = 'GET', body, token } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  const bearer = auth ? (token ?? getToken()) : null;
-  if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  const auth = token ?? getToken();
+  if (auth) headers.Authorization = `Bearer ${auth}`;
 
-  let res;
-  try {
-    res = await fetch(`${API_URL}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  } catch {
-    throw new Error('Cannot reach the RB-VPN server. Check your connection and try again.');
-  }
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
 
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && bearer && typeof window !== 'undefined') {
-    // Expired or revoked session (password changed, secret rotated): sign in again.
-    clearAuth();
-    if (redirectOn401 && !window.location.pathname.startsWith('/login')) {
-      const next = `${window.location.pathname}${window.location.search}`;
-      window.location.href = `/login?next=${encodeURIComponent(next)}`;
-    }
-  }
   if (!res.ok) {
     throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
   }

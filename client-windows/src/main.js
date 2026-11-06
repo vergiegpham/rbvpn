@@ -1,14 +1,4 @@
-const {
-  app,
-  BrowserWindow,
-  ipcMain,
-  Tray,
-  Menu,
-  nativeImage,
-  safeStorage,
-  powerMonitor,
-  Notification,
-} = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -21,39 +11,10 @@ const TUNNEL_NAME = 'RB-VPN';
 const CONF_NAME = `${TUNNEL_NAME}.conf`;
 const DEFAULT_API = process.env.RBVPN_API_URL || 'http://162.35.175.39:4000';
 
-const API_TIMEOUT_MS = 15000;
-
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let quittingAfterTunnelStop = false;
-
-// disconnected | connecting | connected | reconnecting | disconnecting
-let tunnelState = 'disconnected';
-const TUNNEL_STATE_LABELS = {
-  disconnected: 'Disconnected',
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  reconnecting: 'Reconnecting…',
-  disconnecting: 'Disconnecting…',
-};
-
-function setTunnelState(state, message = '') {
-  tunnelState = state;
-  log('info', 'tunnel-state', { state, message });
-  if (tray) tray.setToolTip(`RB-VPN — ${TUNNEL_STATE_LABELS[state] || state}`);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('tunnel-state', { state, message });
-  }
-}
-
-// Connect, disconnect, and watchdog recovery all touch the same Windows service: run them one at a time.
-let tunnelQueue = Promise.resolve();
-function runTunnelOp(fn) {
-  const run = tunnelQueue.then(() => fn());
-  tunnelQueue = run.catch(() => {});
-  return run;
-}
 
 function confPath() {
   return path.join(app.getPath('userData'), CONF_NAME);
@@ -332,25 +293,17 @@ function createWindow() {
   });
 }
 
-// Windows only shows notifications for an app with an AppUserModelID (matches build.appId).
-if (process.platform === 'win32') app.setAppUserModelId('com.rbvpn.client');
-
 app.whenReady().then(async () => {
   log('info', 'app-ready', { logFile: logPath(), userData: app.getPath('userData') });
   // Always tear down leftover tunnel on launch (covers crash / force-kill / reboot).
   try {
-    await runTunnelOp(() => stopTunnel({ reason: 'app-start' }));
+    await stopTunnel({ reason: 'app-start' });
   } catch (err) {
     log('error', 'app-start:stop-tunnel', err.message || String(err));
   }
   applyOpenAtLogin(!!store.get('openAtLogin', false));
   createTray();
   createWindow();
-
-  // After sleep the tunnel may have lost its server session; check soon instead of waiting a full cycle.
-  powerMonitor.on('resume', () => {
-    if (watchdog) setTimeout(scheduleWatchdogTick, 15000);
-  });
 });
 
 // Keep process alive in the tray when the window is hidden.
@@ -372,9 +325,7 @@ app.on('before-quit', (e) => {
   if (!store.get('autoLogin', false)) {
     store.delete('token');
   }
-  stopWatchdog();
-  cancelPendingConnects();
-  runTunnelOp(() => stopTunnel({ reason: 'app-quit' }))
+  stopTunnel({ reason: 'app-quit' })
     .catch((err) => log('error', 'quit:stop-tunnel', err.message || String(err)))
     .finally(() => {
       if (tray) {
@@ -436,17 +387,7 @@ ipcMain.handle('save-settings', (_e, data) => {
   return prefsFromStore();
 });
 
-ipcMain.handle('logout', async () => {
-  // Disconnect first: releasing the server session needs the token we are about to drop.
-  cancelPendingConnects();
-  await runTunnelOp(async () => {
-    stopWatchdog();
-    if (tunnelState !== 'disconnected') {
-      setTunnelState('disconnecting');
-      await stopTunnel({ reason: 'logout' });
-      setTunnelState('disconnected');
-    }
-  });
+ipcMain.handle('logout', () => {
   store.delete('token');
   store.delete('deviceId');
   // Keep email/password when "save password" is on.
@@ -457,34 +398,18 @@ ipcMain.handle('logout', async () => {
   return true;
 });
 
-async function api(pathname, { method = 'GET', body, token, apiUrl, timeoutMs = API_TIMEOUT_MS } = {}) {
+async function api(pathname, { method = 'GET', body, token, apiUrl } = {}) {
   const base = apiUrl || store.get('apiUrl', DEFAULT_API);
   const headers = { 'Content-Type': 'application/json' };
   const auth = token || store.get('token');
   if (auth) headers.Authorization = `Bearer ${auth}`;
-  let res;
-  try {
-    res = await fetch(`${base}${pathname}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    const e = new Error(
-      err.name === 'TimeoutError'
-        ? 'The RB-VPN server did not respond. Check your internet connection and try again.'
-        : 'Cannot reach the RB-VPN server. Check your internet connection and try again.'
-    );
-    e.network = true;
-    throw e;
-  }
+  const res = await fetch(`${base}${pathname}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const e = new Error(data.error || `HTTP ${res.status}`);
-    e.status = res.status;
-    throw e;
-  }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
@@ -878,41 +803,34 @@ function parseEndpointHost(confText) {
   return m ? m[1].trim() : '';
 }
 
-/** Seconds since the newest WireGuard handshake on the tunnel; Infinity if none yet or unreadable. */
-async function latestHandshakeAgeSeconds(helper) {
+/** True when WireGuard has completed at least one handshake with the peer. */
+async function tunnelHasHandshake(helper) {
   const wgCli = wgCliPath(helper);
-  if (!fs.existsSync(wgCli)) return Infinity;
-  // Fall back to listing all interfaces — name mismatches are less brittle.
+  if (!fs.existsSync(wgCli)) return false;
+  // Prefer listing all interfaces — name mismatches are less brittle.
   let r = await execFileAsync(wgCli, ['show', TUNNEL_NAME, 'latest-handshakes']);
   if ((r.err && !r.stdout) || !String(r.stdout || '').trim()) {
     r = await execFileAsync(wgCli, ['show', 'all', 'latest-handshakes']);
   }
   if (r.err && !r.stdout) {
     log('info', 'handshake:wg-show-failed', r.stderr || (r.err && r.err.message));
-    return Infinity;
+    return false;
   }
-  let latest = 0;
   for (const line of String(r.stdout || '')
     .trim()
     .split(/\r?\n/)) {
     if (!line.trim()) continue;
     const parts = line.trim().split(/\s+/);
     const ts = Number(parts[parts.length - 1]);
-    if (Number.isFinite(ts) && ts > latest) latest = ts;
+    if (Number.isFinite(ts) && ts > 0) return true;
   }
-  return latest > 0 ? Math.max(0, Date.now() / 1000 - latest) : Infinity;
+  return false;
 }
 
-/** True when WireGuard has completed at least one handshake with the peer. */
-async function tunnelHasHandshake(helper) {
-  return Number.isFinite(await latestHandshakeAgeSeconds(helper));
-}
-
-async function waitForTunnelHandshake(helper, { timeoutMs = 20000, isCancelled = () => false } = {}) {
+async function waitForTunnelHandshake(helper, { timeoutMs = 20000 } = {}) {
   const started = Date.now();
   progress('tunnel', 'Securing connection…');
   while (Date.now() - started < timeoutMs) {
-    if (isCancelled()) return false;
     if (await tunnelHasHandshake(helper)) {
       log('info', 'handshake:ok', { elapsedMs: Date.now() - started });
       return true;
@@ -1013,13 +931,11 @@ async function checkTunneledInternet(fullConf, { timeoutMs = 12000 } = {}) {
   return false;
 }
 
-/** Resolves with the synced config, or null if cancelled. */
-async function waitForDeviceSynced(deviceId, { timeoutMs = 45000, isCancelled = () => false } = {}) {
+async function waitForDeviceSynced(deviceId, { timeoutMs = 45000 } = {}) {
   const started = Date.now();
   let last = null;
   progress('sync', 'Preparing your connection…');
   while (Date.now() - started < timeoutMs) {
-    if (isCancelled()) return null;
     last = await api(`/api/devices/${deviceId}/config`);
     log('info', 'sync:poll', { syncStatus: last.syncStatus, elapsedMs: Date.now() - started });
     if (last.syncStatus === 'synced') {
@@ -1046,12 +962,7 @@ async function releaseServerSession({ reason = 'disconnect' } = {}) {
   const deviceId = store.get('deviceId');
   if (!deviceId || !store.get('token')) return;
   try {
-    const result = await api(`/api/devices/${deviceId}/disconnect`, {
-      method: 'POST',
-      body: {},
-      // Quit and disconnect wait on this; the server reaps the session anyway if it never arrives.
-      timeoutMs: 8000,
-    });
+    const result = await api(`/api/devices/${deviceId}/disconnect`, { method: 'POST', body: {} });
     log('info', 'session:released', { reason, result });
   } catch (err) {
     log('info', 'session:release-failed', { reason, error: err.message });
@@ -1124,25 +1035,13 @@ async function ensureTunnelRuntime() {
   return { ok: true, helper: preferred };
 }
 
-// Bumped by Disconnect/Quit so an in-flight connect or watchdog reconnect stops at its next step.
-let connectGeneration = 0;
-function cancelPendingConnects() {
-  connectGeneration += 1;
-}
-
-const CANCELLED = { ok: false, cancelled: true, error: 'Connection cancelled.' };
-
-async function connectFlow({ reconnect = false } = {}) {
-  const generation = connectGeneration;
-  const cancelled = () => generation !== connectGeneration;
-
-  if (!reconnect) clearLog();
-  progress('connect', reconnect ? 'Reconnecting…' : 'Connecting…');
+ipcMain.handle('connect', async () => {
+  clearLog();
+  progress('connect', 'Connecting…');
   const deviceId = store.get('deviceId');
   log('info', 'connect:begin', {
     conf: confPath(),
     deviceId,
-    reconnect,
     helper: findTunnelHelper(),
   });
 
@@ -1150,7 +1049,6 @@ async function connectFlow({ reconnect = false } = {}) {
     return { ok: false, error: 'No device profile yet. Sign in and select a node first.' };
   }
 
-  let config;
   try {
     progress('sync', 'Requesting connection…');
     const started = await api(`/api/devices/${deviceId}/connect`, { method: 'POST', body: {} });
@@ -1158,8 +1056,7 @@ async function connectFlow({ reconnect = false } = {}) {
       address: started.address,
       syncStatus: started.syncStatus,
     });
-    config = await waitForDeviceSynced(deviceId, { isCancelled: cancelled });
-    if (!config) return CANCELLED;
+    const config = await waitForDeviceSynced(deviceId);
     fs.writeFileSync(confPath(), config.conf, 'utf8');
     log('info', 'connect:config-written', { address: config.address });
   } catch (err) {
@@ -1174,14 +1071,12 @@ async function connectFlow({ reconnect = false } = {}) {
     await releaseServerSession({ reason: 'runtime-failed' });
     return runtime;
   }
-  if (cancelled()) return CANCELLED;
 
   const fullConf = fs.readFileSync(confPath(), 'utf8');
 
   // One-shot LAN-safe tunnel (WireGuard service owns routes).
   progress('tunnel', 'Starting connection…');
   const startedOk = await enableFullTunnelRoutes(runtime.helper, confPath());
-  if (cancelled()) return CANCELLED;
   if (!startedOk) {
     progress('tunnel', 'Retrying connection…');
     const outPath = fullTunnelConfPath();
@@ -1207,11 +1102,7 @@ async function connectFlow({ reconnect = false } = {}) {
     }
   }
 
-  const handshook = await waitForTunnelHandshake(runtime.helper, {
-    timeoutMs: 25000,
-    isCancelled: cancelled,
-  });
-  if (cancelled()) return CANCELLED;
+  const handshook = await waitForTunnelHandshake(runtime.helper, { timeoutMs: 25000 });
   if (!handshook) {
     await stopTunnel({ reason: 'handshake-timeout' });
     return {
@@ -1224,7 +1115,6 @@ async function connectFlow({ reconnect = false } = {}) {
 
   progress('tunnel', 'Verifying connection…');
   const online = await checkTunneledInternet(fullConf, { timeoutMs: 12000 });
-  if (cancelled()) return CANCELLED;
   if (!online) {
     await stopTunnel({ reason: 'no-internet' });
     return {
@@ -1236,185 +1126,14 @@ async function connectFlow({ reconnect = false } = {}) {
   }
 
   progress('connect', 'Connected');
-  return {
-    ok: true,
-    mode: 'service',
-    message: 'Connected',
-    logFile: logPath(),
-    helper: runtime.helper,
-    address: config.address,
-  };
-}
-
-/* ---------- Connection watchdog ----------
- * After Connect, check the tunnel every 30s. If the server stops answering (VPS reboot, session
- * released, plan ended), recover automatically or disconnect so the PC is never left without internet.
- */
-const WATCHDOG_INTERVAL_MS = 30 * 1000;
-// Live WireGuard sessions re-handshake every 2 minutes (keepalive keeps them live); older means traffic stopped.
-const HANDSHAKE_STALE_SECONDS = 180;
-const RESET_AFTER_MS = 2 * 60 * 1000;
-const GIVE_UP_AFTER_MS = 5 * 60 * 1000;
-const LOST_SERVER_MESSAGE =
-  'Lost contact with the VPN server. Your normal connection was restored — click Connect to try again.';
-
-let watchdog = null;
-let watchdogTickQueued = false;
-
-function startWatchdog(helper, address) {
-  stopWatchdog();
-  watchdog = {
-    helper,
-    address,
-    staleSince: 0,
-    resetTried: false,
-    timer: setInterval(scheduleWatchdogTick, WATCHDOG_INTERVAL_MS),
-  };
-}
-
-function stopWatchdog() {
-  if (watchdog) clearInterval(watchdog.timer);
-  watchdog = null;
-}
-
-function scheduleWatchdogTick() {
-  if (!watchdog || watchdogTickQueued) return;
-  watchdogTickQueued = true;
-  runTunnelOp(async () => {
-    watchdogTickQueued = false;
-    await watchdogTick();
-  }).catch((err) => log('error', 'watchdog:tick-failed', err.message || String(err)));
-}
-
-async function watchdogGiveUp(message) {
-  log('info', 'watchdog:give-up', { message });
-  stopWatchdog();
-  const result = await stopTunnel({ reason: 'watchdog' });
-  const text = result.ok ? message : `${message} ${result.error}`;
-  setTunnelState('disconnected', text);
-  // The window is often hidden in the tray; tell the user why the VPN went away.
-  if (Notification.isSupported()) {
-    new Notification({ title: 'RB-VPN disconnected', body: text, icon: loadAppIcon() }).show();
-  }
-}
-
-async function watchdogReconnect(reason) {
-  log('info', 'watchdog:reconnect', { reason });
-  const result = await connectFlow({ reconnect: true });
-  if (result.cancelled) return;
-  if (result.ok) {
-    startWatchdog(result.helper, result.address);
-    setTunnelState('connected', 'Reconnected.');
-    return;
-  }
-  await watchdogGiveUp(result.error || 'Could not reconnect. Click Connect to try again.');
-}
-
-async function watchdogTick() {
-  const dog = watchdog;
-  if (!dog || isQuitting) return;
-
-  if (!(await isTunnelServiceRunning())) {
-    log('info', 'watchdog:service-stopped');
-    await watchdogGiveUp('The VPN connection was closed outside RB-VPN. Click Connect to reconnect.');
-    return;
-  }
-
-  const age = await latestHandshakeAgeSeconds(dog.helper);
-  if (age <= HANDSHAKE_STALE_SECONDS) {
-    if (dog.staleSince) {
-      log('info', 'watchdog:healthy-again', { staleForMs: Date.now() - dog.staleSince });
-      dog.staleSince = 0;
-      dog.resetTried = false;
-      setTunnelState('connected', 'Connection restored.');
-    }
-    return;
-  }
-
-  if (!dog.staleSince) dog.staleSince = Date.now();
-  const staleForMs = Date.now() - dog.staleSince;
-  log('info', 'watchdog:stale', {
-    handshakeAgeSeconds: Number.isFinite(age) ? Math.round(age) : null,
-    staleForMs,
-  });
-  if (tunnelState !== 'reconnecting') {
-    setTunnelState('reconnecting', 'Connection interrupted — reconnecting…');
-  }
-
-  let session;
-  try {
-    session = await api(`/api/devices/${store.get('deviceId')}/config`);
-  } catch (err) {
-    if (err.status === 402) {
-      return watchdogGiveUp('Your plan has ended. Renew it on the website, then click Connect.');
-    }
-    if (err.status === 401 || err.status === 403) {
-      return watchdogGiveUp('You were signed out. Sign in again to connect.');
-    }
-    if (err.status === 404) {
-      return watchdogGiveUp('This device was removed from your account. Click Connect to set it up again.');
-    }
-    if (err.status === 409) return watchdogReconnect('session-released');
-    // Server unreachable: the network may come back on its own.
-    if (staleForMs >= GIVE_UP_AFTER_MS) return watchdogGiveUp(LOST_SERVER_MESSAGE);
-    return;
-  }
-
-  if (!['pending', 'synced'].includes(session.syncStatus) || session.address !== dog.address) {
-    return watchdogReconnect('session-changed');
-  }
-  // The server still holds the session and its agent restores missing peers within seconds; reset once.
-  if (staleForMs >= RESET_AFTER_MS && !dog.resetTried) {
-    dog.resetTried = true;
-    await releaseServerSession({ reason: 'watchdog-reset' });
-    return watchdogReconnect('reset');
-  }
-  if (staleForMs >= GIVE_UP_AFTER_MS) return watchdogGiveUp(LOST_SERVER_MESSAGE);
-}
-
-function publicConnectResult(result) {
-  const { helper, address, ...rest } = result;
-  return rest;
-}
-
-ipcMain.handle('connect', () =>
-  runTunnelOp(async () => {
-    stopWatchdog();
-    setTunnelState('connecting');
-    const result = await connectFlow();
-    if (result.ok) {
-      startWatchdog(result.helper, result.address);
-      setTunnelState('connected');
-    } else if (!result.cancelled) {
-      setTunnelState('disconnected', result.error);
-    }
-    return publicConnectResult(result);
-  })
-);
-
-ipcMain.handle('disconnect', () => {
-  cancelPendingConnects();
-  return runTunnelOp(async () => {
-    const previous = watchdog;
-    stopWatchdog();
-    setTunnelState('disconnecting');
-    const result = await stopTunnel({ reason: 'disconnect' });
-    if (result.ok) {
-      progress('disconnect', 'Disconnected');
-      setTunnelState('disconnected');
-    } else if (await isTunnelServiceRunning()) {
-      // Still up: keep supervising it so the UI and watchdog stay truthful.
-      const helper = previous?.helper || findTunnelHelper();
-      if (helper) startWatchdog(helper, previous?.address || null);
-      setTunnelState('connected', result.error);
-    } else {
-      setTunnelState('disconnected', result.error);
-    }
-    return { ...result, logFile: logPath() };
-  });
+  return { ok: true, mode: 'service', message: 'Connected', logFile: logPath() };
 });
 
-ipcMain.handle('get-tunnel-state', () => ({ state: tunnelState }));
+ipcMain.handle('disconnect', async () => {
+  const result = await stopTunnel({ reason: 'disconnect' });
+  if (result.ok) progress('disconnect', 'Disconnected');
+  return { ...result, logFile: logPath() };
+});
 
 ipcMain.handle('tunnel-status', async () => {
   const installed = await isTunnelServiceInstalled();

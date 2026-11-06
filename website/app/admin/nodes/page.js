@@ -32,18 +32,6 @@ const emptyPurchase = {
   waitForIp: true,
 };
 
-// The agent reports every ~30s; two minutes of silence means it is down or cannot reach the API.
-function AgentStatus({ seenAt }) {
-  if (!seenAt) return <span className="admin-muted">never reported</span>;
-  const ageMs = Date.now() - new Date(seenAt).getTime();
-  if (ageMs < 2 * 60 * 1000) return <span className="admin-badge admin-badge-ok">online</span>;
-  return (
-    <span className="admin-badge admin-badge-danger" title={new Date(seenAt).toLocaleString()}>
-      offline
-    </span>
-  );
-}
-
 export default function AdminNodesPage() {
   const router = useRouter();
   const [nodes, setNodes] = useState([]);
@@ -545,8 +533,7 @@ export default function AdminNodesPage() {
               <th>Host</th>
               <th>Provider</th>
               <th>Node ID</th>
-              <th>Sessions</th>
-              <th>Agent</th>
+              <th>Peers</th>
               <th>Status</th>
               <th>Actions</th>
             </tr>
@@ -554,7 +541,7 @@ export default function AdminNodesPage() {
           <tbody>
             {nodes.length === 0 && (
               <tr>
-                <td colSpan={8} className="admin-muted">
+                <td colSpan={7} className="admin-muted">
                   No nodes yet. Purchase or create one above.
                 </td>
               </tr>
@@ -576,11 +563,7 @@ export default function AdminNodesPage() {
                   <code style={{ fontSize: '0.75rem' }}>{n.id}</code>
                 </td>
                 <td>
-                  {n.liveSessions ?? 0} live / {n.capacity}
-                  <div className="admin-muted">{n._count?.devices ?? 0} devices</div>
-                </td>
-                <td>
-                  <AgentStatus seenAt={n.agentSeenAt} />
+                  {n._count?.devices ?? 0} / {n.capacity}
                 </td>
                 <td>{n.active ? 'active' : 'disabled'}</td>
                 <td className="admin-actions">

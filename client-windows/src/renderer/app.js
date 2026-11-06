@@ -20,10 +20,10 @@ let unsubProgress = null;
 let tunnelBusy = false;
 let connected = false;
 
-function setTunnelUi({ on, busy = false, busyLabel, pill } = {}) {
+function setTunnelUi({ on, busy = false, busyLabel } = {}) {
   connected = !!on;
   tunnelBusy = !!busy;
-  statusPill.textContent = pill || (on ? 'Connected' : 'Disconnected');
+  statusPill.textContent = on ? 'Connected' : 'Disconnected';
   statusPill.classList.toggle('on', on);
   statusPill.classList.toggle('off', !on);
   if (busy) {
@@ -34,20 +34,6 @@ function setTunnelUi({ on, busy = false, busyLabel, pill } = {}) {
   tunnelBtn.disabled = false;
   tunnelBtn.textContent = on ? 'Disconnect' : 'Connect';
 }
-
-/** Background changes from the main process (auto-reconnect, auto-disconnect, window reload). */
-function applyTunnelState({ state, message } = {}) {
-  // While a click is in flight its handler owns the button; it applies the final state itself.
-  if (tunnelBusy) return;
-  if (state === 'connected') setTunnelUi({ on: true });
-  else if (state === 'reconnecting') setTunnelUi({ on: true, pill: 'Reconnecting…' });
-  else if (state === 'connecting') setTunnelUi({ on: false, busy: true, busyLabel: 'Connecting…' });
-  else if (state === 'disconnecting') setTunnelUi({ on: true, busy: true, busyLabel: 'Disconnecting…' });
-  else setTunnelUi({ on: false });
-  if (message) appMsg.textContent = message;
-}
-
-window.rbvpn.onTunnelState(applyTunnelState);
 
 function applyPrefsToUi(prefs = {}) {
   const savePassword = !!prefs.savePassword;
@@ -109,11 +95,6 @@ async function showApp(email, prefs) {
   userEmail.textContent = email || '';
   appMsg.textContent = '';
   setTunnelUi({ on: false });
-  try {
-    applyTunnelState(await window.rbvpn.getTunnelState());
-  } catch {
-    // keep Disconnected
-  }
   if (prefs) applyPrefsToUi(prefs);
   const settings = await window.rbvpn.getSettings();
   applyPrefsToUi(settings);
@@ -232,18 +213,10 @@ tunnelBtn.addEventListener('click', async () => {
     });
     try {
       const result = await window.rbvpn.disconnect();
-      tunnelBusy = false;
-      if (result.ok) {
-        setTunnelUi({ on: false });
-        appMsg.textContent = 'Disconnected';
-      } else {
-        // The main process reports whether the tunnel is still up.
-        applyTunnelState(await window.rbvpn.getTunnelState());
-        appMsg.textContent = result.error || 'Could not disconnect.';
-      }
+      setTunnelUi({ on: false });
+      appMsg.textContent = result.ok ? 'Disconnected' : result.error || 'Disconnected';
     } catch (err) {
-      tunnelBusy = false;
-      applyTunnelState(await window.rbvpn.getTunnelState().catch(() => ({ state: 'disconnected' })));
+      setTunnelUi({ on: false });
       appMsg.textContent = err.message;
     } finally {
       if (unsubProgress) {
@@ -266,8 +239,8 @@ tunnelBtn.addEventListener('click', async () => {
     const config = await window.rbvpn.ensureDevice({ nodeId });
     const result = await window.rbvpn.connect();
     if (!result.ok) {
+      appMsg.textContent = result.error || 'Could not connect.';
       setTunnelUi({ on: false });
-      if (!result.cancelled) appMsg.textContent = result.error || 'Could not connect.';
       return;
     }
     setTunnelUi({ on: true });

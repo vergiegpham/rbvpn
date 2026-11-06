@@ -1,15 +1,11 @@
+import { Router } from 'express';
 import { z } from 'zod';
 import { authRequired, adminRequired } from '../middleware/auth.js';
 import { prisma } from '../utils/db.js';
-import { createRouter } from '../utils/router.js';
-import { generatePassword, hashPassword } from '../utils/passwords.js';
 import { activateSubscription } from '../services/subscription.js';
-import { releaseUserSessions } from '../services/sessions.js';
 
-const router = createRouter();
+const router = Router();
 router.use(authRequired, adminRequired);
-
-const LIVE_SESSION_WHERE = { clientIp: { not: null }, syncStatus: { in: ['pending', 'synced'] } };
 
 router.get('/stats', async (_req, res) => {
   const now = new Date();
@@ -17,14 +13,13 @@ router.get('/stats', async (_req, res) => {
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  const [users, activeSubs, devices, liveSessions, nodes, paymentsPaid, dailyRevenue, monthlyRevenue] =
+  const [users, activeSubs, devices, nodes, paymentsPaid, dailyRevenue, monthlyRevenue] =
     await Promise.all([
       prisma.user.count(),
       prisma.subscription.count({
         where: { status: 'active', endsAt: { gt: now } },
       }),
-      prisma.device.count({ where: { syncStatus: { not: 'delete_pending' } } }),
-      prisma.device.count({ where: LIVE_SESSION_WHERE }),
+      prisma.device.count(),
       prisma.vpnNode.count({ where: { active: true } }),
       prisma.payment.count({ where: { status: 'paid' } }),
       prisma.payment.aggregate({
@@ -41,7 +36,6 @@ router.get('/stats', async (_req, res) => {
       users,
       activeSubscriptions: activeSubs,
       devices,
-      liveSessions,
       activeNodes: nodes,
       paidPayments: paymentsPaid,
       dailyRevenueCents: dailyRevenue._sum.amountCents || 0,
@@ -50,42 +44,14 @@ router.get('/stats', async (_req, res) => {
   });
 });
 
-async function suspendUser(userId) {
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data: { suspended: true, suspendedAt: new Date() },
-    select: { id: true, email: true, name: true, role: true, suspended: true, suspendedAt: true },
-  });
-  // Agent removes the peers, then the API deletes the device rows.
-  await prisma.device.updateMany({
-    where: { userId, syncStatus: { not: 'delete_pending' } },
-    data: { syncStatus: 'delete_pending' },
-  });
-  return user;
-}
-
-async function unsuspendUser(userId) {
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data: { suspended: false, suspendedAt: null },
-    select: { id: true, email: true, name: true, role: true, suspended: true, suspendedAt: true },
-  });
-  // Rows the agent has not removed yet become clean idle devices; any leftover peer is pruned.
-  await prisma.device.updateMany({
-    where: { userId, syncStatus: 'delete_pending' },
-    data: { syncStatus: 'idle', clientIp: null },
-  });
-  return user;
-}
-
 router.get('/users', async (req, res) => {
-  const q = String(req.query.q || '').trim();
+  const q = String(req.query.q || '').trim().toLowerCase();
   const users = await prisma.user.findMany({
     where: q
       ? {
           OR: [
-            { email: { contains: q, mode: 'insensitive' } },
-            { name: { contains: q, mode: 'insensitive' } },
+            { email: { contains: q } },
+            { name: { contains: q } },
           ],
         }
       : undefined,
@@ -120,24 +86,42 @@ router.patch('/users/:id', async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid body' });
 
-  const { suspended, ...fields } = parsed.data;
-  if (req.params.id === req.user.sub && (suspended === true || fields.role === 'user')) {
-    return res.status(400).json({ error: 'You cannot suspend or demote your own account' });
-  }
-  if (fields.role === 'user') {
-    const target = await prisma.user.findUnique({ where: { id: req.params.id }, select: { role: true } });
-    if (target?.role === 'admin' && (await prisma.user.count({ where: { role: 'admin' } })) <= 1) {
-      return res.status(400).json({ error: 'Cannot demote the last admin account' });
-    }
+  if (parsed.data.suspended === true && req.params.id === req.user.sub) {
+    return res.status(400).json({ error: 'You cannot suspend your own account' });
   }
 
-  let user = await prisma.user.update({
+  const data = { ...parsed.data };
+  if (parsed.data.suspended === true) {
+    data.suspendedAt = new Date();
+  } else if (parsed.data.suspended === false) {
+    data.suspendedAt = null;
+  }
+
+  const user = await prisma.user.update({
     where: { id: req.params.id },
-    data: fields,
-    select: { id: true, email: true, name: true, role: true, suspended: true, suspendedAt: true },
+    data,
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      role: true,
+      suspended: true,
+      suspendedAt: true,
+    },
   });
-  if (suspended === true && !user.suspended) user = await suspendUser(user.id);
-  if (suspended === false && user.suspended) user = await unsuspendUser(user.id);
+
+  if (parsed.data.suspended === true) {
+    await prisma.device.updateMany({
+      where: { userId: user.id, syncStatus: { not: 'delete_pending' } },
+      data: { syncStatus: 'delete_pending' },
+    });
+  } else if (parsed.data.suspended === false) {
+    // Re-provision any peers not yet removed by the node agent
+    await prisma.device.updateMany({
+      where: { userId: user.id, syncStatus: 'delete_pending' },
+      data: { syncStatus: 'pending' },
+    });
+  }
 
   res.json({ user });
 });
@@ -146,24 +130,29 @@ router.post('/users/:id/suspend', async (req, res) => {
   if (req.params.id === req.user.sub) {
     return res.status(400).json({ error: 'You cannot suspend your own account' });
   }
-  const user = await suspendUser(req.params.id);
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { suspended: true, suspendedAt: new Date() },
+    select: { id: true, email: true, suspended: true, suspendedAt: true },
+  });
+  await prisma.device.updateMany({
+    where: { userId: user.id, syncStatus: { not: 'delete_pending' } },
+    data: { syncStatus: 'delete_pending' },
+  });
   res.json({ user, ok: true });
 });
 
 router.post('/users/:id/unsuspend', async (req, res) => {
-  const user = await unsuspendUser(req.params.id);
-  res.json({ user, ok: true });
-});
-
-/** Sets a random temporary password and signs the user out everywhere; shown to the admin once. */
-router.post('/users/:id/reset-password', async (req, res) => {
-  const temporaryPassword = generatePassword();
   const user = await prisma.user.update({
     where: { id: req.params.id },
-    data: { passwordHash: await hashPassword(temporaryPassword), passwordChangedAt: new Date() },
-    select: { id: true, email: true },
+    data: { suspended: false, suspendedAt: null },
+    select: { id: true, email: true, suspended: true, suspendedAt: true },
   });
-  res.json({ ok: true, user, temporaryPassword });
+  await prisma.device.updateMany({
+    where: { userId: user.id, syncStatus: 'delete_pending' },
+    data: { syncStatus: 'pending' },
+  });
+  res.json({ user, ok: true });
 });
 
 router.delete('/users/:id', async (req, res) => {
@@ -199,25 +188,21 @@ router.post('/users/:id/subscription', async (req, res) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'planCode required' });
 
-  // Admins may grant hidden (inactive) plans, e.g. a trial not shown on the pricing page.
-  const plan = await prisma.plan.findFirst({ where: { code: parsed.data.planCode } });
+  const plan = await prisma.plan.findFirst({
+    where: { code: parsed.data.planCode, active: true },
+  });
   if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-  const target = await prisma.user.findUnique({ where: { id: req.params.id }, select: { id: true } });
-  if (!target) return res.status(404).json({ error: 'User not found' });
-
-  const sub = await activateSubscription(target.id, plan.id);
+  const sub = await activateSubscription(req.params.id, plan.id);
   res.status(201).json({ subscription: sub });
 });
 
 router.post('/users/:id/subscription/cancel', async (req, res) => {
-  const cancelled = await prisma.subscription.updateMany({
+  await prisma.subscription.updateMany({
     where: { userId: req.params.id, status: 'active' },
     data: { status: 'cancelled' },
   });
-  // Access ends now, not at the next connect.
-  const released = await releaseUserSessions(req.params.id);
-  res.json({ ok: true, cancelled: cancelled.count, releasedSessions: released });
+  res.json({ ok: true });
 });
 
 router.get('/subscriptions', async (_req, res) => {
@@ -232,21 +217,11 @@ router.get('/subscriptions', async (_req, res) => {
   res.json({ subscriptions: subs });
 });
 
-router.get('/payments', async (req, res) => {
-  const status = String(req.query.status || '').trim();
+router.get('/payments', async (_req, res) => {
   const payments = await prisma.payment.findMany({
-    where: status ? { status } : undefined,
     orderBy: { createdAt: 'desc' },
-    take: 200,
-    select: {
-      id: true,
-      provider: true,
-      providerRef: true,
-      amountCents: true,
-      currency: true,
-      status: true,
-      createdAt: true,
-      updatedAt: true,
+    take: 100,
+    include: {
       user: { select: { id: true, email: true } },
       plan: { select: { name: true, code: true } },
     },
@@ -254,32 +229,11 @@ router.get('/payments', async (req, res) => {
   res.json({ payments });
 });
 
-router.get('/devices', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  const liveOnly = req.query.live === '1';
+router.get('/devices', async (_req, res) => {
   const devices = await prisma.device.findMany({
-    where: {
-      syncStatus: { not: 'delete_pending' },
-      ...(liveOnly ? LIVE_SESSION_WHERE : {}),
-      ...(q
-        ? {
-            OR: [
-              { name: { contains: q, mode: 'insensitive' } },
-              { clientIp: { contains: q } },
-              { user: { email: { contains: q, mode: 'insensitive' } } },
-            ],
-          }
-        : {}),
-    },
-    orderBy: [{ lastSeenAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
-    take: 200,
-    select: {
-      id: true,
-      name: true,
-      clientIp: true,
-      syncStatus: true,
-      lastSeenAt: true,
-      createdAt: true,
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    include: {
       user: { select: { id: true, email: true } },
       node: { select: { id: true, name: true, region: true } },
     },
@@ -287,59 +241,15 @@ router.get('/devices', async (req, res) => {
   res.json({ devices });
 });
 
-/** Free the device's VPN IP (peer removed by the agent); the device can connect again. */
-router.post('/devices/:id/disconnect', async (req, res) => {
-  const device = await prisma.device.findUnique({ where: { id: req.params.id } });
-  if (!device) return res.status(404).json({ error: 'Device not found' });
-  if (device.clientIp && ['pending', 'synced'].includes(device.syncStatus)) {
-    await prisma.device.update({ where: { id: device.id }, data: { syncStatus: 'release_pending' } });
-    return res.json({ ok: true, released: true });
-  }
-  res.json({ ok: true, released: false });
-});
-
-router.delete('/devices/:id', async (req, res) => {
-  await prisma.device.update({ where: { id: req.params.id }, data: { syncStatus: 'delete_pending' } });
-  res.json({ ok: true });
-});
-
 router.get('/plans', async (_req, res) => {
   const plans = await prisma.plan.findMany({ orderBy: { priceCents: 'asc' } });
   res.json({ plans });
 });
 
-router.post('/plans', async (req, res) => {
-  const schema = z.object({
-    code: z
-      .string()
-      .trim()
-      .min(2)
-      .max(40)
-      .regex(/^[a-z0-9-]+$/, 'Use lowercase letters, digits, and dashes'),
-    name: z.string().trim().min(1).max(80),
-    description: z.string().trim().max(200).default(''),
-    priceCents: z.number().int().positive(),
-    durationDays: z.number().int().positive(),
-    maxDevices: z.number().int().positive(),
-    active: z.boolean().default(true),
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: 'Invalid plan. Code uses lowercase letters/digits/dashes; price, days, and devices must be positive.',
-    });
-  }
-  const existing = await prisma.plan.findUnique({ where: { code: parsed.data.code } });
-  if (existing) return res.status(409).json({ error: 'A plan with this code already exists' });
-
-  const plan = await prisma.plan.create({ data: { ...parsed.data, currency: 'usd' } });
-  res.status(201).json({ plan });
-});
-
 router.patch('/plans/:id', async (req, res) => {
   const schema = z.object({
-    name: z.string().trim().min(1).max(80).optional(),
-    description: z.string().trim().max(200).optional(),
+    name: z.string().optional(),
+    description: z.string().optional(),
     priceCents: z.number().int().positive().optional(),
     durationDays: z.number().int().positive().optional(),
     maxDevices: z.number().int().positive().optional(),
@@ -356,17 +266,11 @@ router.patch('/plans/:id', async (req, res) => {
 });
 
 router.get('/nodes', async (_req, res) => {
-  const [nodes, live] = await Promise.all([
-    prisma.vpnNode.findMany({
-      orderBy: { createdAt: 'asc' },
-      include: { _count: { select: { devices: true } } },
-    }),
-    prisma.device.groupBy({ by: ['nodeId'], where: LIVE_SESSION_WHERE, _count: { _all: true } }),
-  ]);
-  const liveByNode = new Map(live.map((row) => [row.nodeId, row._count._all]));
-  res.json({
-    nodes: nodes.map((n) => ({ ...n, liveSessions: liveByNode.get(n.id) || 0 })),
+  const nodes = await prisma.vpnNode.findMany({
+    orderBy: { createdAt: 'asc' },
+    include: { _count: { select: { devices: true } } },
   });
+  res.json({ nodes });
 });
 
 router.post('/nodes', async (req, res) => {
@@ -416,17 +320,16 @@ router.patch('/nodes/:id', async (req, res) => {
 
 router.delete('/nodes/:id', async (req, res) => {
   const nodeId = req.params.id;
-  const liveCount = await prisma.device.count({ where: { nodeId, ...LIVE_SESSION_WHERE } });
-  if (liveCount > 0) {
+  const deviceCount = await prisma.device.count({
+    where: { nodeId, syncStatus: { not: 'delete_pending' } },
+  });
+  if (deviceCount > 0) {
     return res.status(400).json({
-      error: `Cannot delete a node with ${liveCount} connected session(s). Disable it and disconnect them first.`,
+      error: `Cannot delete node with ${deviceCount} active device(s). Move or remove them first.`,
     });
   }
-  // Idle device profiles are recreated by the Windows app on the next connect.
-  await prisma.$transaction([
-    prisma.device.deleteMany({ where: { nodeId } }),
-    prisma.vpnNode.delete({ where: { id: nodeId } }),
-  ]);
+  await prisma.device.deleteMany({ where: { nodeId } });
+  await prisma.vpnNode.delete({ where: { id: nodeId } });
   res.json({ ok: true });
 });
 

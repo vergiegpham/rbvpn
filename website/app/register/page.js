@@ -20,7 +20,6 @@ export default function RegisterPage() {
       const data = await api('/api/auth/register', {
         method: 'POST',
         body: { name, email, password },
-        auth: false,
       });
       setAuth(data.token, data.user);
       window.location.href = '/pricing';
@@ -38,34 +37,21 @@ export default function RegisterPage() {
         <h1>Create account</h1>
         <p className="lead">Then pick a plan and download the Windows client.</p>
         <label>Name</label>
-        <input value={name} onChange={(e) => setName(e.target.value)} required maxLength={80} />
+        <input value={name} onChange={(e) => setName(e.target.value)} required />
         <label>Email</label>
-        <input
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          type="email"
-          autoComplete="username"
-          required
-          maxLength={120}
-        />
-        <label>Password (8–72 characters)</label>
+        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+        <label>Password (min 8)</label>
         <input
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           type="password"
-          autoComplete="new-password"
           minLength={8}
-          maxLength={72}
           required
         />
         <button className="btn-primary btn-block" disabled={loading}>
           {loading ? 'Creating…' : 'Create account'}
         </button>
         <p className="error">{error}</p>
-        <p className="lead" style={{ fontSize: '0.9rem' }}>
-          By creating an account you agree to the <Link href="/terms">Terms of Service</Link> and{' '}
-          <Link href="/privacy">Privacy Policy</Link>.
-        </p>
         <p className="lead">
           Already have an account? <Link href="/login">Log in</Link>
         </p>

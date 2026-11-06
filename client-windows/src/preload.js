@@ -13,16 +13,10 @@ contextBridge.exposeInMainWorld('rbvpn', {
   connect: () => ipcRenderer.invoke('connect'),
   disconnect: () => ipcRenderer.invoke('disconnect'),
   tunnelStatus: () => ipcRenderer.invoke('tunnel-status'),
-  getTunnelState: () => ipcRenderer.invoke('get-tunnel-state'),
   openLog: () => ipcRenderer.invoke('open-log'),
   onConnectProgress: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('connect-progress', handler);
     return () => ipcRenderer.removeListener('connect-progress', handler);
-  },
-  onTunnelState: (cb) => {
-    const handler = (_e, payload) => cb(payload);
-    ipcRenderer.on('tunnel-state', handler);
-    return () => ipcRenderer.removeListener('tunnel-state', handler);
   },
 });

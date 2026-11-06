@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import SiteNav from '@/components/SiteNav';
-import SiteFooter from '@/components/SiteFooter';
 import { api, getStoredUser } from '@/lib/api';
 
 export default function ContactPage() {
@@ -95,7 +94,6 @@ export default function ContactPage() {
           {error && <p className="error">{error}</p>}
         </form>
       </section>
-      <SiteFooter />
     </div>
   );
 }

@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { env } from '../utils/env.js';
 import { prisma } from '../utils/db.js';
@@ -15,28 +14,21 @@ export async function authRequired(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
-
-  let payload;
   try {
-    payload = jwt.verify(token, env.jwtSecret);
+    const payload = jwt.verify(token, env.jwtSecret);
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, role: true, suspended: true },
+    });
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    if (user.suspended) {
+      return res.status(403).json({ error: 'Account suspended. Contact support.' });
+    }
+    req.user = { sub: user.id, email: user.email, role: user.role };
+    next();
   } catch {
-    return res.status(401).json({ error: 'Session expired. Please sign in again.' });
+    return res.status(401).json({ error: 'Invalid token' });
   }
-
-  const user = await prisma.user.findUnique({
-    where: { id: payload.sub },
-    select: { id: true, email: true, role: true, suspended: true, passwordChangedAt: true },
-  });
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  // Second granularity: `iat` is whole seconds, and the token issued by a password change must stay valid.
-  if (user.passwordChangedAt && payload.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) {
-    return res.status(401).json({ error: 'Password was changed. Please sign in again.' });
-  }
-  if (user.suspended) {
-    return res.status(403).json({ error: 'Account suspended. Contact support.' });
-  }
-  req.user = { sub: user.id, email: user.email, role: user.role };
-  next();
 }
 
 export function adminRequired(req, res, next) {
@@ -46,15 +38,9 @@ export function adminRequired(req, res, next) {
   next();
 }
 
-function safeEqual(a, b) {
-  const left = Buffer.from(String(a));
-  const right = Buffer.from(String(b));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
 export function nodeAgentRequired(req, res, next) {
   const secret = req.headers['x-node-agent-secret'];
-  if (!secret || !safeEqual(secret, env.nodeAgentSecret)) {
+  if (!secret || secret !== env.nodeAgentSecret) {
     return res.status(401).json({ error: 'Invalid node agent secret' });
   }
   next();

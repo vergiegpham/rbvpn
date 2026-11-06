@@ -15,8 +15,6 @@ model User {
   role         String         @default("user")
   suspended    Boolean        @default(false)
   suspendedAt  DateTime?
-  // Tokens issued before this moment are rejected (password change / admin reset).
-  passwordChangedAt DateTime?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
   subscriptions Subscription[]
@@ -73,8 +71,6 @@ model VpnNode {
   providerRef    String?
   provisionStatus String? @default("ready")
   providerMeta   String?
-  // Last time this node's vpn-agent reported in (heartbeat with peer handshakes).
-  agentSeenAt    DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   devices        Device[]

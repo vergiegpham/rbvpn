@@ -1,8 +1,8 @@
 import { prisma } from '../utils/db.js';
 
-export async function getActiveSubscription(userId, db = prisma) {
+export async function getActiveSubscription(userId) {
   const now = new Date();
-  return db.subscription.findFirst({
+  return prisma.subscription.findFirst({
     where: {
       userId,
       status: 'active',
@@ -17,20 +17,19 @@ export async function getActiveSubscription(userId, db = prisma) {
  * Activate or extend subscription.
  * If the user already has an active subscription, add duration from the current end date
  * (extend) instead of replacing it. Plan upgrades switch to the purchased plan while extending.
- * Pass a transaction client as `db` to make activation atomic with the caller's writes.
  */
-export async function activateSubscription(userId, planId, db = prisma) {
-  const plan = await db.plan.findUnique({ where: { id: planId } });
+export async function activateSubscription(userId, planId) {
+  const plan = await prisma.plan.findUnique({ where: { id: planId } });
   if (!plan) throw new Error('Plan not found');
 
   const now = new Date();
   const ms = plan.durationDays * 24 * 60 * 60 * 1000;
-  const current = await getActiveSubscription(userId, db);
+  const current = await getActiveSubscription(userId);
 
   if (current) {
     const base = current.endsAt > now ? current.endsAt : now;
     const endsAt = new Date(base.getTime() + ms);
-    return db.subscription.update({
+    return prisma.subscription.update({
       where: { id: current.id },
       data: {
         planId,
@@ -42,7 +41,7 @@ export async function activateSubscription(userId, planId, db = prisma) {
   }
 
   const endsAt = new Date(now.getTime() + ms);
-  return db.subscription.create({
+  return prisma.subscription.create({
     data: {
       userId,
       planId,
