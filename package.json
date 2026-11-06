@@ -2,6 +2,7 @@
   "name": "rbvpn",
   "version": "6.10.7",
   "private": true,
+  "license": "MIT",
   "description": "RB-VPN platform — website, API, Linux WireGuard nodes, Windows client",
   "scripts": {
     "api": "npm --prefix api run dev",
