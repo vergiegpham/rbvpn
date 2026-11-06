@@ -1,0 +1,63 @@
+# Builds an unsigned RB-VPN MSI on GitHub Actions and asks SignPath to sign it.
+# SignPath Foundation must approve the project first. Then add these repository secrets:
+#   SIGNPATH_API_TOKEN
+#   SIGNPATH_ORGANIZATION_ID
+#   SIGNPATH_PROJECT_SLUG
+#   SIGNPATH_SIGNING_POLICY_SLUG
+# Run this workflow from the Actions tab. Approve the request in the SignPath dashboard.
+name: Sign Windows installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client-windows/package-lock.json
+
+      - name: Install and build an unsigned MSI
+        working-directory: client-windows
+        run: |
+          npm ci
+          npm run version:date
+          npm run prepare:runtime
+          npx electron-builder --win --config.directories.output=dist-msi --config.win.sign=null
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload the unsigned installer
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: RB-VPN-Setup-unsigned
+          path: client-windows/dist-msi/RB-VPN-Setup-*.msi
+          if-no-files-found: error
+
+      - name: Submit the installer to SignPath
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-msi
+
+      - name: Publish the signed installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: RB-VPN-Setup-signed
+          path: signed-msi/**
+          if-no-files-found: error
