@@ -1,9 +1,9 @@
-import { Router } from 'express';
 import { prisma } from '../utils/db.js';
 import { authRequired } from '../middleware/auth.js';
+import { createRouter } from '../utils/router.js';
 import { getActiveSubscription } from '../services/subscription.js';
 
-const router = Router();
+const router = createRouter();
 
 router.get('/', async (_req, res) => {
   const plans = await prisma.plan.findMany({

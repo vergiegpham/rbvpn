@@ -4,7 +4,20 @@ import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import SiteNav from '@/components/SiteNav';
-import { api, getStoredUser, getToken, clearAuth } from '@/lib/api';
+import { api, getStoredUser, getToken, clearAuth, setAuth } from '@/lib/api';
+
+function deviceStatus(syncStatus) {
+  switch (syncStatus) {
+    case 'synced':
+      return 'Connected';
+    case 'pending':
+      return 'Connecting…';
+    case 'release_pending':
+      return 'Disconnecting…';
+    default:
+      return 'Disconnected';
+  }
+}
 
 function DashboardInner() {
   const params = useSearchParams();
@@ -169,8 +182,7 @@ function DashboardInner() {
               <div>
                 <strong>{d.name}</strong>
                 <div className="lead" style={{ margin: 0 }}>
-                  {d.node?.name} · {d.node?.region} ·{' '}
-                  {d.syncStatus === 'synced' ? 'ready' : 'provisioning'}
+                  {d.node?.name} · {d.node?.region} · {deviceStatus(d.syncStatus)}
                 </div>
               </div>
               <div className="pay-row">
@@ -193,6 +205,8 @@ function DashboardInner() {
           ))}
         </div>
 
+        <ChangePassword />
+
         <button
           className="ghost-btn"
           style={{ marginTop: '1.5rem' }}
@@ -206,6 +220,64 @@ function DashboardInner() {
         </button>
       </section>
     </div>
+  );
+}
+
+function ChangePassword() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState('');
+  const [error, setError] = useState('');
+
+  async function onSubmit(e) {
+    e.preventDefault();
+    setOk('');
+    setError('');
+    setBusy(true);
+    try {
+      const data = await api('/api/auth/change-password', {
+        method: 'POST',
+        body: { currentPassword, newPassword },
+      });
+      setAuth(data.token, data.user);
+      setCurrentPassword('');
+      setNewPassword('');
+      setOk('Password updated. Sign in again on the Windows app with the new password.');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel" style={{ marginTop: '1rem' }} onSubmit={onSubmit}>
+      <h3>Change password</h3>
+      <label>Current password</label>
+      <input
+        type="password"
+        autoComplete="current-password"
+        value={currentPassword}
+        onChange={(e) => setCurrentPassword(e.target.value)}
+        required
+      />
+      <label>New password (8–72 characters)</label>
+      <input
+        type="password"
+        autoComplete="new-password"
+        minLength={8}
+        maxLength={72}
+        value={newPassword}
+        onChange={(e) => setNewPassword(e.target.value)}
+        required
+      />
+      <button className="btn-primary" disabled={busy}>
+        {busy ? 'Saving…' : 'Update password'}
+      </button>
+      {ok && <p className="ok">{ok}</p>}
+      {error && <p className="error">{error}</p>}
+    </form>
   );
 }
 

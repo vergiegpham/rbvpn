@@ -8,8 +8,12 @@ import paymentRoutes from './routes/payments.js';
 import agentRoutes from './routes/agent.js';
 import adminRoutes from './routes/admin.js';
 import contactRoutes from './routes/contact.js';
+import { handleStripeWebhook } from './services/payments.js';
+import { startSessionSweeper } from './services/sessions.js';
 
 const app = express();
+// Use X-Forwarded-For only when a reverse proxy on this host (nginx) forwards the request.
+app.set('trust proxy', 'loopback');
 
 app.use(
   cors({
@@ -24,12 +28,11 @@ app.post(
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      const { handleStripeWebhook } = await import('./services/payments.js');
-      const signature = req.headers['stripe-signature'];
-      const result = await handleStripeWebhook(req.body, signature);
+      const result = await handleStripeWebhook(req.body, req.headers['stripe-signature']);
       res.json(result);
     } catch (err) {
-      res.status(err.status || 400).json({ error: err.message });
+      if (!err.status || err.status >= 500) console.error('Stripe webhook error:', err);
+      res.status(err.status || 500).json({ error: err.message });
     }
   }
 );
@@ -48,11 +51,28 @@ app.use('/api/agent', agentRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/contact', contactRoutes);
 
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 app.use((err, _req, res, _next) => {
+  if (err?.code === 'P2025') return res.status(404).json({ error: 'Not found' });
+  if (err?.code === 'P2002') return res.status(409).json({ error: 'Already exists' });
+
+  const status = Number(err?.status || err?.statusCode) || 500;
+  if (status < 500) {
+    const message = err.expose === false ? 'Bad request' : err.message || 'Bad request';
+    return res.status(status).json({ error: message });
+  }
   console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(status).json({ error: status === 500 ? 'Internal server error' : err.message });
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
 });
 
 app.listen(env.port, () => {
   console.log(`RB-VPN API listening on http://localhost:${env.port}`);
+  startSessionSweeper();
 });

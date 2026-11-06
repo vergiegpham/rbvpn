@@ -112,6 +112,7 @@ def ssh_connect(info: dict[str, str]):
         allow_agent=False,
         look_for_keys=False,
     )
+    client.get_transport().set_keepalive(15)
     return client
 
 

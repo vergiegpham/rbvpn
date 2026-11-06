@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import SiteNav from '@/components/SiteNav';
-import { api, getToken } from '@/lib/api';
+import { api, formatMoney, getToken } from '@/lib/api';
 
 function formatDuration(days) {
   if (days >= 365) return '/ year';
@@ -12,6 +12,7 @@ function formatDuration(days) {
 
 export default function PricingPage() {
   const [plans, setPlans] = useState([]);
+  const [providers, setProviders] = useState(null);
   const [subscription, setSubscription] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -21,6 +22,10 @@ export default function PricingPage() {
       .then((d) => setPlans(d.plans || []))
       .catch((e) => setError(e.message));
 
+    api('/api/payments/providers')
+      .then((d) => setProviders(d.providers || {}))
+      .catch(() => setProviders({}));
+
     if (getToken()) {
       api('/api/plans/subscription')
         .then((d) => setSubscription(d.subscription || null))
@@ -29,6 +34,9 @@ export default function PricingPage() {
   }, []);
 
   const hasActive = Boolean(subscription);
+  const stripeOn = Boolean(providers?.stripe?.available);
+  const cryptoOn = Boolean(providers?.crypto?.available);
+  const anyPay = stripeOn || cryptoOn;
 
   async function checkout(planCode, provider) {
     if (!getToken()) {
@@ -63,7 +71,7 @@ export default function PricingPage() {
           {plan.description}
         </p>
         <p className="price">
-          ${(plan.priceCents / 100).toFixed(0)}{' '}
+          {formatMoney(plan.priceCents, plan.currency)}{' '}
           <span>{formatDuration(plan.durationDays)}</span>
         </p>
         <p className="lead">
@@ -79,28 +87,36 @@ export default function PricingPage() {
           </p>
         )}
         <div className="pay-row">
-          <button
-            className="btn-primary"
-            disabled={!!busy}
-            onClick={() => checkout(plan.code, 'stripe')}
-          >
-            {busy === `${plan.code}-stripe`
-              ? '…'
-              : hasActive
-                ? 'Extend with Stripe'
-                : 'Pay with Stripe'}
-          </button>
-          <button
-            className="ghost-btn"
-            disabled={!!busy}
-            onClick={() => checkout(plan.code, 'crypto')}
-          >
-            {busy === `${plan.code}-crypto`
-              ? '…'
-              : hasActive
-                ? 'Extend with crypto'
-                : 'Pay with crypto'}
-          </button>
+          {stripeOn && (
+            <button
+              className="btn-primary"
+              disabled={!!busy}
+              onClick={() => checkout(plan.code, 'stripe')}
+            >
+              {busy === `${plan.code}-stripe`
+                ? '…'
+                : providers.stripe.mock
+                  ? 'Test checkout'
+                  : hasActive
+                    ? 'Extend with card'
+                    : 'Pay with card'}
+            </button>
+          )}
+          {cryptoOn && (
+            <button
+              className="ghost-btn"
+              disabled={!!busy}
+              onClick={() => checkout(plan.code, 'crypto')}
+            >
+              {busy === `${plan.code}-crypto`
+                ? '…'
+                : providers.crypto.mock
+                  ? 'Test crypto checkout'
+                  : hasActive
+                    ? 'Extend with crypto'
+                    : 'Pay with crypto'}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -112,9 +128,12 @@ export default function PricingPage() {
       <section className="section">
         <h2>Pricing</h2>
         <p className="lead">
-          Pay with card (Stripe) or crypto. If you already have a plan, buying again{' '}
-          <strong>extends</strong> your current expiry — it does not restart it.
+          Plans are prepaid. If you already have a plan, buying again <strong>extends</strong> your
+          current expiry — it does not restart it.
         </p>
+        {providers && !anyPay && (
+          <p className="lead">Online checkout is not set up yet. Contact us to activate a plan.</p>
+        )}
         {hasActive && (
           <p className="ok">
             Active: {subscription.plan?.name} until{' '}

@@ -1,5 +1,5 @@
-import { Router } from 'express';
 import { z } from 'zod';
+import { createRouter } from '../utils/router.js';
 import { authRequired } from '../middleware/auth.js';
 import {
   listUserDevices,
@@ -12,7 +12,7 @@ import {
 } from '../services/devices.js';
 import { prisma } from '../utils/db.js';
 
-const router = Router();
+const router = createRouter();
 
 function deviceDto(device) {
   return {

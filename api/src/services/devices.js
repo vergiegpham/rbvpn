@@ -251,11 +251,23 @@ export async function startDeviceSession(userId, deviceId) {
   }
 
   const updated = await prisma.$transaction(async (tx) => {
+    // Row lock serializes allocations per node; without it two connects can pick the same IP.
+    await tx.$queryRaw`SELECT id FROM "VpnNode" WHERE id = ${device.nodeId} FOR UPDATE`;
     const locked = await tx.vpnNode.findUnique({ where: { id: device.nodeId } });
     if (!locked) {
       const err = new Error('VPN node not found');
       err.status = 404;
       throw err;
+    }
+    const current = await tx.device.findUnique({ where: { id: device.id }, include: { node: true } });
+    if (current?.clientIp && ACTIVE_PEER_STATUSES.includes(current.syncStatus)) {
+      return current.syncStatus === 'release_pending'
+        ? tx.device.update({
+            where: { id: device.id },
+            data: { syncStatus: 'pending' },
+            include: { node: true },
+          })
+        : current;
     }
     const activePeers = await countActivePeersOnNode(tx, locked.id);
     if (activePeers >= locked.capacity) {

@@ -1,11 +1,15 @@
-import { Router } from 'express';
 import { z } from 'zod';
 import { authRequired, adminRequired } from '../middleware/auth.js';
 import { prisma } from '../utils/db.js';
+import { createRouter } from '../utils/router.js';
+import { generatePassword, hashPassword } from '../utils/passwords.js';
 import { activateSubscription } from '../services/subscription.js';
+import { releaseUserSessions } from '../services/sessions.js';
 
-const router = Router();
+const router = createRouter();
 router.use(authRequired, adminRequired);
+
+const LIVE_SESSION_WHERE = { clientIp: { not: null }, syncStatus: { in: ['pending', 'synced'] } };
 
 router.get('/stats', async (_req, res) => {
   const now = new Date();
@@ -45,13 +49,13 @@ router.get('/stats', async (_req, res) => {
 });
 
 router.get('/users', async (req, res) => {
-  const q = String(req.query.q || '').trim().toLowerCase();
+  const q = String(req.query.q || '').trim();
   const users = await prisma.user.findMany({
     where: q
       ? {
           OR: [
-            { email: { contains: q } },
-            { name: { contains: q } },
+            { email: { contains: q, mode: 'insensitive' } },
+            { name: { contains: q, mode: 'insensitive' } },
           ],
         }
       : undefined,
@@ -116,10 +120,9 @@ router.patch('/users/:id', async (req, res) => {
       data: { syncStatus: 'delete_pending' },
     });
   } else if (parsed.data.suspended === false) {
-    // Re-provision any peers not yet removed by the node agent
     await prisma.device.updateMany({
       where: { userId: user.id, syncStatus: 'delete_pending' },
-      data: { syncStatus: 'pending' },
+      data: { syncStatus: 'idle', clientIp: null },
     });
   }
 
@@ -150,9 +153,20 @@ router.post('/users/:id/unsuspend', async (req, res) => {
   });
   await prisma.device.updateMany({
     where: { userId: user.id, syncStatus: 'delete_pending' },
-    data: { syncStatus: 'pending' },
+    data: { syncStatus: 'idle', clientIp: null },
   });
   res.json({ user, ok: true });
+});
+
+/** Sets a random temporary password and signs the user out everywhere. */
+router.post('/users/:id/reset-password', async (req, res) => {
+  const temporaryPassword = generatePassword();
+  const user = await prisma.user.update({
+    where: { id: req.params.id },
+    data: { passwordHash: await hashPassword(temporaryPassword), passwordChangedAt: new Date() },
+    select: { id: true, email: true },
+  });
+  res.json({ ok: true, user, temporaryPassword });
 });
 
 router.delete('/users/:id', async (req, res) => {
@@ -198,11 +212,12 @@ router.post('/users/:id/subscription', async (req, res) => {
 });
 
 router.post('/users/:id/subscription/cancel', async (req, res) => {
-  await prisma.subscription.updateMany({
+  const cancelled = await prisma.subscription.updateMany({
     where: { userId: req.params.id, status: 'active' },
     data: { status: 'cancelled' },
   });
-  res.json({ ok: true });
+  const released = await releaseUserSessions(req.params.id);
+  res.json({ ok: true, cancelled: cancelled.count, releasedSessions: released });
 });
 
 router.get('/subscriptions', async (_req, res) => {
@@ -229,16 +244,53 @@ router.get('/payments', async (_req, res) => {
   res.json({ payments });
 });
 
-router.get('/devices', async (_req, res) => {
+router.get('/devices', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const liveOnly = req.query.live === '1';
   const devices = await prisma.device.findMany({
-    orderBy: { createdAt: 'desc' },
-    take: 100,
-    include: {
+    where: {
+      syncStatus: { not: 'delete_pending' },
+      ...(liveOnly ? LIVE_SESSION_WHERE : {}),
+      ...(q
+        ? {
+            OR: [
+              { name: { contains: q, mode: 'insensitive' } },
+              { clientIp: { contains: q } },
+              { user: { email: { contains: q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: [{ lastSeenAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+    take: 200,
+    select: {
+      id: true,
+      name: true,
+      clientIp: true,
+      syncStatus: true,
+      lastSeenAt: true,
+      createdAt: true,
       user: { select: { id: true, email: true } },
       node: { select: { id: true, name: true, region: true } },
     },
   });
   res.json({ devices });
+});
+
+/** Free the device's VPN IP. The device can connect again. */
+router.post('/devices/:id/disconnect', async (req, res) => {
+  const device = await prisma.device.findUnique({ where: { id: req.params.id } });
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (device.clientIp && ['pending', 'synced'].includes(device.syncStatus)) {
+    await prisma.device.update({ where: { id: device.id }, data: { syncStatus: 'release_pending' } });
+    return res.json({ ok: true, released: true });
+  }
+  res.json({ ok: true, released: false });
+});
+
+router.delete('/devices/:id', async (req, res) => {
+  await prisma.device.update({ where: { id: req.params.id }, data: { syncStatus: 'delete_pending' } });
+  res.json({ ok: true });
 });
 
 router.get('/plans', async (_req, res) => {
@@ -266,11 +318,17 @@ router.patch('/plans/:id', async (req, res) => {
 });
 
 router.get('/nodes', async (_req, res) => {
-  const nodes = await prisma.vpnNode.findMany({
-    orderBy: { createdAt: 'asc' },
-    include: { _count: { select: { devices: true } } },
+  const [nodes, live] = await Promise.all([
+    prisma.vpnNode.findMany({
+      orderBy: { createdAt: 'asc' },
+      include: { _count: { select: { devices: true } } },
+    }),
+    prisma.device.groupBy({ by: ['nodeId'], where: LIVE_SESSION_WHERE, _count: { _all: true } }),
+  ]);
+  const liveByNode = new Map(live.map((row) => [row.nodeId, row._count._all]));
+  res.json({
+    nodes: nodes.map((n) => ({ ...n, liveSessions: liveByNode.get(n.id) || 0 })),
   });
-  res.json({ nodes });
 });
 
 router.post('/nodes', async (req, res) => {

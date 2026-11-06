@@ -1,8 +1,8 @@
-import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../utils/db.js';
+import { createRouter } from '../utils/router.js';
 
-const router = Router();
+const router = createRouter();
 
 // Simple in-memory rate limit: max 5 messages per IP per 10 minutes
 const recent = new Map();
@@ -21,8 +21,8 @@ function tooMany(ip) {
 }
 
 router.post('/', async (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.ip || 'unknown';
-  if (tooMany(ip)) {
+  // req.ip uses X-Forwarded-For only from the local nginx proxy (trust proxy = loopback).
+  if (tooMany(req.ip || 'unknown')) {
     return res.status(429).json({ error: 'Too many messages. Please try again later.' });
   }
 

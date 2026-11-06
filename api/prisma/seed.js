@@ -1,143 +1,137 @@
+// First-run data: plans, the first admin, and a starter node.
+// Safe to re-run: existing plan prices and node settings are left as the admin set them.
 import { PrismaClient } from '@prisma/client';
-import bcrypt from 'bcryptjs';
+import { generatePassword, hashPassword } from '../src/utils/passwords.js';
+import { isPlaceholder } from '../src/utils/env.js';
 
 const prisma = new PrismaClient();
 
-async function main() {
-  const basicMonthly = await prisma.plan.upsert({
-    where: { code: 'basic' },
-    update: {
-      name: 'Basic Monthly',
-      description: '1 device · all nodes · billed monthly',
-      priceCents: 999,
-      durationDays: 30,
-      maxDevices: 1,
-      active: true,
-    },
-    create: {
-      code: 'basic',
-      name: 'Basic Monthly',
-      description: '1 device · all nodes · billed monthly',
-      priceCents: 999,
-      currency: 'usd',
-      durationDays: 30,
-      maxDevices: 1,
-      stripePriceId: process.env.STRIPE_PRICE_BASIC || null,
-    },
-  });
+const PLANS = [
+  {
+    code: 'basic',
+    name: 'Basic Monthly',
+    description: '1 device · all nodes · billed monthly',
+    priceCents: 999,
+    durationDays: 30,
+    maxDevices: 1,
+    stripePriceEnv: 'STRIPE_PRICE_BASIC',
+  },
+  {
+    code: 'pro',
+    name: 'Pro Monthly',
+    description: '3 devices · all nodes · billed monthly',
+    priceCents: 1999,
+    durationDays: 30,
+    maxDevices: 3,
+    stripePriceEnv: 'STRIPE_PRICE_PRO',
+  },
+  {
+    code: 'basic-annual',
+    name: 'Basic Annual',
+    description: '1 device · all nodes · billed yearly',
+    priceCents: 10000,
+    durationDays: 365,
+    maxDevices: 1,
+    stripePriceEnv: 'STRIPE_PRICE_BASIC_ANNUAL',
+  },
+  {
+    code: 'pro-annual',
+    name: 'Pro Annual',
+    description: '3 devices · all nodes · billed yearly',
+    priceCents: 20000,
+    durationDays: 365,
+    maxDevices: 3,
+    stripePriceEnv: 'STRIPE_PRICE_PRO_ANNUAL',
+  },
+];
 
-  const proMonthly = await prisma.plan.upsert({
-    where: { code: 'pro' },
-    update: {
-      name: 'Pro Monthly',
-      description: '3 devices · all nodes · billed monthly',
-      priceCents: 1999,
-      durationDays: 30,
-      maxDevices: 3,
-      active: true,
-    },
-    create: {
-      code: 'pro',
-      name: 'Pro Monthly',
-      description: '3 devices · all nodes · billed monthly',
-      priceCents: 1999,
-      currency: 'usd',
-      durationDays: 30,
-      maxDevices: 3,
-      stripePriceId: process.env.STRIPE_PRICE_PRO || null,
-    },
-  });
+function envValue(name) {
+  const value = process.env[name];
+  return isPlaceholder(value) ? null : value;
+}
 
-  const basicAnnual = await prisma.plan.upsert({
-    where: { code: 'basic-annual' },
-    update: {
-      name: 'Basic Annual',
-      description: '1 device · all nodes · billed yearly',
-      priceCents: 10000,
-      durationDays: 365,
-      maxDevices: 1,
-      active: true,
-    },
-    create: {
-      code: 'basic-annual',
-      name: 'Basic Annual',
-      description: '1 device · all nodes · billed yearly',
-      priceCents: 10000,
-      currency: 'usd',
-      durationDays: 365,
-      maxDevices: 1,
-      stripePriceId: process.env.STRIPE_PRICE_BASIC_ANNUAL || null,
-    },
-  });
+async function seedPlans() {
+  const created = [];
+  for (const { stripePriceEnv, ...plan } of PLANS) {
+    const stripePriceId = envValue(stripePriceEnv);
+    const existing = await prisma.plan.findUnique({ where: { code: plan.code } });
+    if (!existing) {
+      await prisma.plan.create({ data: { ...plan, currency: 'usd', active: true, stripePriceId } });
+      created.push(plan.code);
+    } else if (stripePriceId && existing.stripePriceId !== stripePriceId) {
+      await prisma.plan.update({ where: { id: existing.id }, data: { stripePriceId } });
+    } else if (!stripePriceId && isPlaceholder(existing.stripePriceId) && existing.stripePriceId) {
+      await prisma.plan.update({ where: { id: existing.id }, data: { stripePriceId: null } });
+    }
+  }
+  console.log(created.length ? `Created plans: ${created.join(', ')}` : 'Plans already present');
+}
 
-  const proAnnual = await prisma.plan.upsert({
-    where: { code: 'pro-annual' },
-    update: {
-      name: 'Pro Annual',
-      description: '3 devices · all nodes · billed yearly',
-      priceCents: 20000,
-      durationDays: 365,
-      maxDevices: 3,
-      active: true,
-    },
-    create: {
-      code: 'pro-annual',
-      name: 'Pro Annual',
-      description: '3 devices · all nodes · billed yearly',
-      priceCents: 20000,
-      currency: 'usd',
-      durationDays: 365,
-      maxDevices: 3,
-      stripePriceId: process.env.STRIPE_PRICE_PRO_ANNUAL || null,
-    },
-  });
+async function seedAdmin() {
+  if ((await prisma.user.count({ where: { role: 'admin' } })) > 0) {
+    console.log('Admin account already present');
+    return;
+  }
 
-  const passwordHash = await bcrypt.hash('admin123!', 10);
-  await prisma.user.upsert({
-    where: { email: 'admin@rbvpn.local' },
-    update: {},
-    create: {
-      email: 'admin@rbvpn.local',
-      passwordHash,
-      name: 'Admin',
-      role: 'admin',
-    },
-  });
+  const email = (process.env.ADMIN_EMAIL || 'admin@rbvpn.local').trim().toLowerCase();
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    console.warn(`No admin exists and ${email} is a regular user — promote that account in the database.`);
+    return;
+  }
 
-  await prisma.vpnNode.upsert({
-    where: { id: 'seed-node-us' },
-    update: {
-      name: 'US West 1',
-      region: 'us-west',
-      publicHost: process.env.SEED_NODE_HOST || 'vpn.example.com',
-      publicPort: Number(process.env.SEED_NODE_PORT || 51820),
-      publicKey: process.env.SEED_NODE_PUBLIC_KEY || 'REPLACE_WITH_SERVER_PUBLIC_KEY',
-      active: true,
-    },
-    create: {
-      id: 'seed-node-us',
-      name: 'US West 1',
-      region: 'us-west',
-      publicHost: process.env.SEED_NODE_HOST || 'vpn.example.com',
-      publicPort: Number(process.env.SEED_NODE_PORT || 51820),
-      publicKey: process.env.SEED_NODE_PUBLIC_KEY || 'REPLACE_WITH_SERVER_PUBLIC_KEY',
-      interfaceName: 'wg0',
-      subnetCidr: '10.10.0.0/24',
-      gatewayIp: '10.10.0.1',
-      nextClientIp: 2,
-      capacity: 250,
-      active: true,
-    },
+  const fromEnv = process.env.ADMIN_PASSWORD;
+  const password = fromEnv || generatePassword(16);
+  await prisma.user.create({
+    data: { email, passwordHash: await hashPassword(password), name: 'Admin', role: 'admin' },
   });
-
   console.log(
-    'Seeded plans:',
-    basicMonthly.code,
-    proMonthly.code,
-    basicAnnual.code,
-    proAnnual.code
+    fromEnv
+      ? `Created admin ${email} (password from ADMIN_PASSWORD)`
+      : `Created admin ${email} with password: ${password}  <- save it now; it is not shown again`
   );
-  console.log('Admin login: admin@rbvpn.local / admin123!');
+}
+
+async function seedNode() {
+  const host = process.env.SEED_NODE_HOST || '';
+  const key = process.env.SEED_NODE_PUBLIC_KEY || '';
+
+  if ((await prisma.vpnNode.count()) === 0) {
+    await prisma.vpnNode.create({
+      data: {
+        id: 'seed-node-us',
+        name: 'US West 1',
+        region: 'us-west',
+        publicHost: host || 'vpn.example.com',
+        publicPort: Number(process.env.SEED_NODE_PORT || 51820),
+        publicKey: key || 'REPLACE_WITH_SERVER_PUBLIC_KEY',
+        interfaceName: 'wg0',
+        subnetCidr: '10.10.0.0/24',
+        gatewayIp: '10.10.0.1',
+        nextClientIp: 2,
+        capacity: 250,
+        active: Boolean(host && key),
+      },
+    });
+    console.log('Created starter node seed-node-us');
+    return;
+  }
+
+  const node = await prisma.vpnNode.findUnique({ where: { id: 'seed-node-us' } });
+  if (!node) return;
+  const data = {};
+  if (host && node.publicHost === 'vpn.example.com') data.publicHost = host;
+  if (key && isPlaceholder(node.publicKey)) data.publicKey = key;
+  if (Object.keys(data).length) {
+    await prisma.vpnNode.update({ where: { id: node.id }, data });
+    console.log(`Filled starter node placeholders: ${Object.keys(data).join(', ')}`);
+  }
+}
+
+async function main() {
+  await seedPlans();
+  await seedAdmin();
+  await seedNode();
 }
 
 main()
